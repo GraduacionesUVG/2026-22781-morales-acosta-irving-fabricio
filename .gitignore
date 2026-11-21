@@ -1,0 +1,27 @@
+# Variables de entorno
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Datos de sesiones de participantes (no se suben)
+src/plataforma/backend/registros/
+src/plataforma/backend/sesiones/
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# IDE / sistema
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+*.log

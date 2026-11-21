@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Resolver sin leer — Plataforma experimental</title>
+<style>
+  :root {
+    /* Paleta neutra: gris papel y tinta, sin acentos de color que puedan
+       sesgar la atención hacia una zona sobre otra. */
+    --bg: #fafaf9;
+    --panel-bg: #ffffff;
+    --text: #1c1c1a;
+    --text-muted: #6b6b66;
+    --rule: #e4e2dd;
+    --mono: "JetBrains Mono", "Fira Code", Consolas, monospace;
+    --sans: "Inter", "Segoe UI", system-ui, sans-serif;
+
+    /* Margen anti-imprecisión entre AOIs (Holmqvist et al., 2011).
+       Expresado en vw/vh: se mantiene proporcional sin importar la
+       resolución real de la ventana o el monitor de sesión. Una vez
+       se confirme el monitor exacto, esto se puede fijar en px si se
+       prefiere mayor control milimétrico. */
+    --aoi-gap: 2.1vw;
+    --page-margin: 1.25vw;
+
+    /* Orden de columnas (izquierda a derecha), fijo para todo el
+       estudio: NO varía por participante ni por sesión, es una
+       preferencia del investigador decidida una sola vez, antes de
+       iniciar la recolección real. Valores 1/2/3, sin repetir. Debe
+       coincidir con el mismo orden usado en declarativa.html, para
+       que ambas tareas presenten el layout de forma consistente. */
+    --orden-fuente: 1;
+    --orden-produccion: 2;
+    --orden-chat: 3;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden; /* nunca debe aparecer scroll, a ninguna resolución */
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+  }
+
+  /* Contenedor exterior: únicamente el grid de 3 columnas. La consigna
+     ya no vive en una franja separada: se fusionó dentro de la AOI de
+     fuente (ver sección "consigna-integrada" más abajo), por decisión
+     explícita del investigador, asumiendo que ya no se puede distinguir
+     "leyó la consigna" de "consultó la fuente" como métricas separadas. */
+  .pagina {
+    width: 100vw;
+    height: 100vh;
+    padding: var(--page-margin);
+  }
+
+  /* Grid de 3 columnas iguales, una sola fila, altura completa. El
+     orden visual de las columnas lo controlan las variables
+     --orden-fuente/--orden-produccion/--orden-chat de arriba, vía la
+     propiedad CSS `order` (funciona en grid igual que en flexbox,
+     siempre que los items NO tengan grid-column/grid-row explícitos,
+     por eso ninguna de las tres secciones de abajo fija su posición:
+     se autoubican en orden según `order`). */
+  .layout {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: var(--aoi-gap);
+  }
+
+  #aoi-fuente {
+    order: var(--orden-fuente);
+  }
+
+  #aoi-chat {
+    order: var(--orden-chat);
+  }
+
+  #aoi-produccion {
+    order: var(--orden-produccion);
+  }
+
+  .aoi {
+    background: var(--panel-bg);
+    display: flex;
+    flex-direction: column;
+    min-height: 0; /* permite que el contenido interno haga su propio scroll-safe layout */
+    overflow: hidden;
+  }
+
+  .aoi-header {
+    flex: 0 0 auto;
+    padding: 16px 20px 12px 20px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .aoi-label {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  .aoi-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 20px;
+    overflow: hidden; /* el contenido debe ajustarse, no generar scroll */
+  }
+
+  /* --- AOI 1: Fuente --- */
+  /* Tamaño de fuente relativo al alto de viewport (vh), no en píxeles
+     fijos. Esto es intencional: el objetivo no es "que quepa en esta
+     pantalla" sino "que quepa sin scroll en la máquina real de sesión",
+     sea cual sea su resolución. Cuando se mida el monitor de la U,
+     ajustar SOLO --fuente-codigo (una variable) hasta que las 53 líneas
+     del código base entren completas sin activar el scroll de
+     seguridad de abajo. No reducir tocando reglas dispersas.
+
+     Por qué esto importa más que estética: si el código se desborda y
+     hay que hacer scroll, parte de la AOI "fuente" queda fuera de vista
+     en todo momento, y el eye tracker no puede registrar fijaciones
+     sobre contenido que no está en pantalla. El scroll rompe el mapeo
+     fijación→AOI, que es el dato central del estudio. Por eso el ajuste
+     de proporción tiene prioridad sobre el tamaño visual "ideal". */
+  :root {
+    --fuente-codigo: 12px; /* aumentado desde 0.80vh a pedido: se buscó
+                                 igualar el tamaño de letra de producción/
+                                 chat (14px fijos), pero eso desborda fuerte
+                                 (el contenido pasa a necesitar ~1.6x el
+                                 espacio disponible a 1920x1080). 0.88vh es
+                                 el máximo medido que mantiene margen
+                                 positivo en las 4 resoluciones de prueba
+                                 (mínimo 29px en 1280x720). Renderiza a
+                                 ~9.5px a 1920x1080: más grande que antes,
+                                 pero no llega a igualar los 14px de
+                                 producción/chat sin scroll. PROVISIONAL:
+                                 re-medir contra el monitor real de la U. */
+  }
+
+  #aoi-fuente .aoi-body {
+    font-family: var(--mono);
+    font-size: var(--fuente-codigo);
+    line-height: 1.55;
+    white-space: pre-wrap;
+    color: var(--text);
+    overflow-y: auto; /* red de seguridad, NO el comportamiento esperado:
+                          si esto se activa, --fuente-codigo está mal
+                          calibrado para la pantalla real y hay que
+                          bajarlo, no dejar que el scroll absorba el
+                          desborde (ver nota arriba). */
+  }
+
+  /* Consigna fusionada dentro de la AOI de fuente (decisión explícita:
+     ya no es una AOI separada, así que "leyó consigna" y "consultó
+     fuente" dejan de poder distinguirse como métricas independientes).
+     El separador de abajo es puramente cosmético para el participante
+     humano: no crea una región ni un fondo distinto, sigue siendo el
+     mismo bloque de scroll y el mismo fondo que el resto de la AOI. */
+  .consigna-integrada {
+    font-family: var(--sans);
+    white-space: normal;
+    margin-bottom: 0.9em;
+    padding-bottom: 0.9em;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .consigna-integrada strong {
+    font-weight: 600;
+  }
+
+  #aoi-fuente pre {
+    margin: 0;
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    white-space: pre-wrap;
+  }
+
+  /* --- AOI 2: Chat --- */
+  #aoi-chat .aoi-body {
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+  }
+
+  .chat-mensajes {
+    flex: 1 1 auto;
+    overflow-y: auto; /* scroll interno permitido SOLO dentro del chat,
+                          no afecta el layout general de la página */
+    padding: 16px 20px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .chat-mensaje {
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    max-width: 88%;
+    white-space: pre-wrap;
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  .chat-mensaje-usuario {
+    background: var(--bg);
+    margin-left: auto;
+    border: 1px solid var(--rule);
+  }
+
+  .chat-mensaje-ia {
+    background: var(--panel-bg);
+    border: 1px solid var(--rule);
+  }
+
+  /* Indicador de "escribiendo...": tres puntos que parpadean en cascada
+     mientras se espera la respuesta del modelo. Usa la misma burbuja
+     visual que un mensaje de la IA para no introducir un elemento
+     nuevo en el layout. */
+  .chat-mensaje-pensando {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 14px;
+  }
+
+  .chat-mensaje-pensando span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    opacity: 0.3;
+    animation: chat-pensando-parpadeo 1.2s infinite ease-in-out;
+  }
+
+  .chat-mensaje-pensando span:nth-child(2) { animation-delay: 0.2s; }
+  .chat-mensaje-pensando span:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes chat-pensando-parpadeo {
+    0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+    40% { opacity: 1; transform: translateY(-2px); }
+  }
+
+  .chat-input-row {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 8px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--rule);
+  }
+
+  .chat-input-row textarea {
+    flex: 1 1 auto;
+    resize: none;
+    font-family: var(--sans);
+    font-size: 12px;
+    padding: 8px 10px;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    height: 40px;
+    max-height: 120px;
+    overflow-y: auto;
+    transition: height 0.12s ease;
+  }
+
+  .chat-input-row button {
+    flex: 0 0 auto;
+    font-family: var(--sans);
+    font-size: 12px;
+    padding: 8px 16px;
+    border: 1px solid var(--rule);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .chat-input-row button:hover {
+    background: var(--rule);
+  }
+
+  /* --- AOI 3: Producción --- */
+  #aoi-produccion .aoi-body {
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .editor-area {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text);
+    padding: 16px 20px;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* El bloque editable y el bloque de pruebas (solo lectura) comparten
+     tipografía, color y fondo para percibirse como una sola pieza
+     continua, sin costura visible entre "editable" y "protegido". */
+  .editor-area textarea,
+  .editor-area pre {
+    margin: 0;
+    padding: 0;
+    border: none;
+    outline: none;
+    background: transparent;
+    font: inherit;
+    color: inherit;
+    white-space: pre-wrap;
+  }
+
+  #editor-codigo {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0; /* deja que el textarea encoja junto al gutter sin desbordar la fila */
+    resize: none;
+    /* Sin ajuste de línea: una línea lógica larga se desplaza en
+       horizontal DENTRO del textarea en lugar de partirse en varias
+       filas visuales. Es una simplificación deliberada: mantiene el
+       mapeo 1 línea = 1 número. El scroll horizontal es interno a la
+       AOI, no de página (patrón ya aceptado, p. ej. el historial del chat). */
+    white-space: pre;
+    overflow: auto; /* vertical: red de seguridad, igual que en la AOI de
+                       fuente. horizontal: para las líneas largas sin wrap. */
+  }
+
+  /* La barra horizontal del editor usa el mismo grosor discreto que la
+     vertical (la regla de arriba solo fija `width`). */
+  #editor-codigo::-webkit-scrollbar {
+    height: 6px;
+  }
+
+  #editor-pruebas {
+    flex: 1 1 auto; /* ocupa el ancho de la fila, junto al gutter */
+    min-width: 0;
+    /* Contenido fijo y de solo lectura: se deja envolver (como siempre)
+       en vez de forzar un scroll horizontal. A la resolución objetivo
+       cada assert entra en una sola línea y su número alinea; si la
+       ventana se estrechara tanto que un assert envolviera, esa es señal
+       de recalibrar el layout, no de absorberlo con una barra de scroll
+       que a la vez sesga la atención en un estudio de eye-tracking. */
+    white-space: pre-wrap;
+    overflow: visible;
+  }
+
+  /* Numeración de línea de la zona de Producción (AOI 3). Añadido
+     puramente visual: NO altera el value del <textarea> ni el texto que
+     "Probar código" / el cierre silencioso leen y envían. Solo el bloque
+     editable muestra números (empezando en 1); el bloque de asserts, al
+     ser fijo y de solo lectura, va sin numeración para no sugerir que se
+     puede editar. Ver #gutter-pruebas más abajo: el elemento se conserva
+     oculto porque procedimental.js le asigna textContent y aborta la
+     numeración del editor si no lo encuentra. */
+  .editor-linea {
+    display: flex;
+    flex-direction: row;
+    min-height: 0;
+    min-width: 0;
+  }
+
+  .editor-linea-editable { flex: 1 1 auto; }
+  .editor-linea-pruebas { flex: 0 0 auto; }
+
+  .editor-gutter {
+    flex: 0 0 auto;
+    width: 3ch;
+    padding-right: 8px;
+    box-sizing: content-box; /* anula el border-box global: 3ch reales para los dígitos */
+    /* Mismos font-family, font-size y line-height que el textarea y el
+       bloque de asserts (heredados de .editor-area), para que cada
+       número quede exactamente al lado de su línea, sin deriva al crecer
+       o desplazarse el contenido. */
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    text-align: right;
+    white-space: pre;
+    color: var(--text-muted); /* gris secundario ya definido en este
+                                 archivo (etiqueta de AOI, texto de
+                                 resultados, pulgar del scrollbar al pasar
+                                 el cursor): legible pero discreto, sin
+                                 color nuevo ni tinte de fondo. --rule era
+                                 casi igual al blanco del panel y hacía
+                                 los números invisibles. */
+    overflow: hidden; /* el gutter editable sigue el scroll del textarea
+                         desplazando su contenido interno, sin scroll propio */
+    user-select: none;
+    -webkit-user-select: none;
+    pointer-events: none;
+  }
+
+  /* El bloque de asserts (solo lectura) no lleva numeración. No se puede
+     borrar el <div id="gutter-pruebas"> del HTML porque procedimental.js
+     (que no se toca) hace getElementById("gutter-pruebas") y, si es null,
+     aborta toda la inicialización del gutter —incluido el del editor—.
+     Se deja entonces como espaciador invisible: visibility:hidden no
+     pinta los números que el JS le sigue asignando, pero conserva el
+     ancho del gutter (3ch + 8px), de modo que el texto de los asserts
+     queda alineado con el del código editable, no pegado al margen. */
+  #gutter-pruebas {
+    visibility: hidden;
+  }
+
+  .fila-probar {
+    flex: 0 0 auto;
+    padding: 8px 20px;
+    border-top: 1px solid var(--rule);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .fila-probar button {
+    font-family: var(--sans);
+    font-size: 12px;
+    padding: 6px 14px;
+    border: 1px solid var(--rule);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .fila-probar button:hover {
+    background: var(--rule);
+  }
+
+  .fila-probar button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .resultados {
+    flex: 0 0 auto;
+    padding: 10px 20px;
+    border-top: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-muted);
+    min-height: 60px;
+  }
+
+  .resultados.exito { color: #2f6b3a; }
+  .resultados.error { color: #8a3a3a; }
+
+  /* Barra superior fuera del grid de AOIs: cronómetro, código de participante.
+     No es zona de interés, es metadato de sesión. */
+  .barra-sesion {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 0; /* se integra dentro del padding de página, no resta espacio visible */
+  }
+
+  /* Scrollbars discretos: en un estudio con eye-tracking, una barra de
+     scroll gruesa o de alto contraste es un elemento visualmente
+     saliente que puede sesgar la atención del participante hacia el
+     borde donde vive. Se reduce el grosor y se reutiliza la paleta
+     neutra (--rule / --panel-bg / --text-muted) para que el scrollbar
+     se perciba como una afordancia discreta, no como un elemento que
+     compite por la atención. Sigue siendo arrastrable y visible: el
+     objetivo es discreción, no invisibilidad. Idéntico a declarativa.html. */
+  .chat-mensajes,
+  .chat-input-row textarea,
+  #editor-codigo,
+  #aoi-fuente .aoi-body {
+    scrollbar-width: thin; /* Firefox */
+    scrollbar-color: var(--rule) var(--panel-bg); /* Firefox: pulgar, track */
+  }
+
+  .chat-mensajes::-webkit-scrollbar,
+  .chat-input-row textarea::-webkit-scrollbar,
+  #editor-codigo::-webkit-scrollbar,
+  #aoi-fuente .aoi-body::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .chat-mensajes::-webkit-scrollbar-track,
+  .chat-input-row textarea::-webkit-scrollbar-track,
+  #editor-codigo::-webkit-scrollbar-track,
+  #aoi-fuente .aoi-body::-webkit-scrollbar-track {
+    background: var(--panel-bg);
+  }
+
+  .chat-mensajes::-webkit-scrollbar-thumb,
+  .chat-input-row textarea::-webkit-scrollbar-thumb,
+  #editor-codigo::-webkit-scrollbar-thumb,
+  #aoi-fuente .aoi-body::-webkit-scrollbar-thumb {
+    background-color: var(--rule);
+    border-radius: 3px;
+  }
+
+  .chat-mensajes::-webkit-scrollbar-thumb:hover,
+  .chat-input-row textarea::-webkit-scrollbar-thumb:hover,
+  #editor-codigo::-webkit-scrollbar-thumb:hover,
+  #aoi-fuente .aoi-body::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-muted);
+  }
+</style>
+</head>
+<body>
+
+  <div class="pagina">
+
+    <div class="layout">
+
+      <section id="aoi-fuente" class="aoi">
+        <div class="aoi-header">
+          <div class="aoi-label">Fuente</div>
+        </div>
+        <div class="aoi-body" id="contenido-fuente"><div class="consigna-integrada" id="texto-consigna">El archivo <strong>reservas.py</strong> contiene un sistema de reservas de salas de estudio que ya funciona. Tu tarea es implementar la función <strong>sugerir_horario(sala, duracion)</strong>, que debe devolver la hora de inicio (en el mismo formato de horas del sistema) del primer bloque libre con esa duración en minutos dentro de la sala indicada, o <strong>None</strong> si no hay espacio disponible hoy. Tu función debe pasar las 3 pruebas incluidas en el editor. El asistente de IA está disponible y debes consultarlo al menos una vez. Tienes 12 minutos. El chat de IA <strong>no ve automáticamente</strong> tu código ni este enunciado.</div><pre id="codigo-fuente">"""Sistema de reservas de salas de estudio.
+Los horarios se manejan como enteros: las 9:30 se representa como 930.
+"""
+
+SALAS = {
+    "A1": {"capacidad": 4, "apertura": 700, "cierre": 2100},
+    "B2": {"capacidad": 8, "apertura": 700, "cierre": 2100},
+    "C3": {"capacidad": 12, "apertura": 900, "cierre": 1800},
+}
+
+reservas = []
+
+
+def _a_minutos(hora):
+    """Convierte 930 -> 570 (minutos desde medianoche)."""
+    return (hora // 100) * 60 + (hora % 100)
+
+
+def _choca(ini1, fin1, ini2, fin2):
+    """True si dos bloques [ini, fin) se traslapan (en minutos)."""
+    return _a_minutos(ini1) < _a_minutos(fin2) and _a_minutos(ini2) < _a_minutos(fin1)
+
+
+def agregar_reserva(sala, inicio, fin):
+    """Registra una reserva si la sala existe, está dentro del horario
+    de la sala y no choca con otra reserva activa. Devuelve el id o None."""
+    if sala not in SALAS:
+        return None
+    datos = SALAS[sala]
+    if inicio < datos["apertura"] or fin > datos["cierre"]:
+        return None
+    for r in reservas:
+        if r["sala"] == sala and r["activa"] and _choca(inicio, fin, r["inicio"], r["fin"]):
+            return None
+    nuevo_id = len(reservas) + 1
+    reservas.append({"id": nuevo_id, "sala": sala, "inicio": inicio,
+                      "fin": fin, "activa": True})
+    return nuevo_id
+
+
+def cancelar_reserva(id_reserva):
+    """Desactiva la reserva con ese id. Devuelve True si la encontró."""
+    for r in reservas:
+        if r["id"] == id_reserva and r["activa"]:
+            r["activa"] = False
+            return True
+    return False
+
+
+def reservas_de_sala(sala):
+    """Lista de reservas activas de una sala, ordenadas por hora de inicio."""
+    activas = [r for r in reservas if r["sala"] == sala and r["activa"]]
+    return sorted(activas, key=lambda r: _a_minutos(r["inicio"]))</pre></div>
+      </section>
+
+      <section id="aoi-chat" class="aoi">
+        <div class="aoi-header">
+          <div class="aoi-label">Chat de IA</div>
+        </div>
+        <div class="aoi-body">
+          <div class="chat-mensajes" id="chat-mensajes">
+            <!-- Mensajes del participante y respuestas del modelo se insertan aquí -->
+          </div>
+          <div class="chat-input-row">
+            <textarea id="chat-input" placeholder="Escribe tu pregunta..."></textarea>
+            <button id="chat-enviar">Enviar</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="aoi-produccion" class="aoi">
+        <div class="aoi-header">
+          <div class="aoi-label">Producción</div>
+        </div>
+        <div class="aoi-body">
+          <div class="editor-area">
+            <div class="editor-linea editor-linea-editable">
+              <div class="editor-gutter" id="gutter-codigo" aria-hidden="true"><div class="editor-gutter-inner" id="gutter-codigo-inner"></div></div>
+              <textarea id="editor-codigo" rows="6" spellcheck="false">from reservas import SALAS, reservas_de_sala, _a_minutos
+
+
+def sugerir_horario(sala, duracion):
+    # TU CÓDIGO AQUÍ
+    pass</textarea>
+            </div>
+            <div class="editor-linea editor-linea-pruebas">
+              <div class="editor-gutter" id="gutter-pruebas" aria-hidden="true"></div>
+              <pre id="editor-pruebas" tabindex="-1"># ---- Pruebas: tu función debe pasar las tres ----
+assert sugerir_horario("A1", 90) == 1000   # hueco entre reservas
+assert sugerir_horario("B2", 90) == 700    # sala libre: sugiere la apertura
+assert sugerir_horario("C3", 120) is None  # sin hueco suficiente</pre>
+            </div>
+          </div>
+          <div class="fila-probar">
+            <button id="btn-probar">Probar código</button>
+          </div>
+          <div class="resultados" id="resultados-pruebas">
+            Resultados de las pruebas aparecerán aquí al ejecutar.
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+  </div>
+
+  <script src="/comun.js"></script>
+  <script src="/procedimental.js"></script>
+</body>
+</html>
