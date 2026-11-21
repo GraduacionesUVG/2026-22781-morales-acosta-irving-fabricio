@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Resolver sin leer — Plataforma experimental</title>
+<style>
+  :root {
+    /* Paleta neutra: gris papel y tinta, sin acentos de color que puedan
+       sesgar la atención hacia una zona sobre otra. */
+    --bg: #fafaf9;
+    --panel-bg: #ffffff;
+    --text: #1c1c1a;
+    --text-muted: #6b6b66;
+    --rule: #e4e2dd;
+    --mono: "JetBrains Mono", "Fira Code", Consolas, monospace;
+    --sans: "Inter", "Segoe UI", system-ui, sans-serif;
+
+    /* Margen anti-imprecisión entre AOIs (Holmqvist et al., 2011).
+       Expresado en vw/vh: se mantiene proporcional sin importar la
+       resolución real de la ventana o el monitor de sesión. Una vez
+       se confirme el monitor exacto, esto se puede fijar en px si se
+       prefiere mayor control milimétrico. */
+    --aoi-gap: 2.1vw;
+    --page-margin: 1.25vw;
+
+    /* Orden de columnas (izquierda a derecha), fijo para todo el
+       estudio: NO varía por participante ni por sesión, es una
+       preferencia del investigador decidida una sola vez, antes de
+       iniciar la recolección real. Valores 1/2/3, sin repetir.
+       Ejemplo para instrucciones+fuente | producción | chat (el orden
+       por default de este archivo): 1, 2, 3.
+       Para poner el chat primero: --orden-chat: 1; --orden-fuente: 2;
+       --orden-produccion: 3. */
+    --orden-fuente: 1;
+    --orden-produccion: 2;
+    --orden-chat: 3;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden; /* nunca debe aparecer scroll de página, a ninguna
+                          resolución: movería los límites de las AOIs */
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+  }
+
+  /* Contenedor exterior: únicamente el grid de 3 columnas. La consigna
+     ya no vive en una franja separada: se fusionó dentro de la AOI de
+     fuente (ver sección "consigna-integrada" más abajo), por decisión
+     explícita del investigador, asumiendo que ya no se puede distinguir
+     "leyó la consigna" de "consultó la fuente" como métricas separadas. */
+  .pagina {
+    width: 100vw;
+    height: 100vh;
+    padding: var(--page-margin);
+  }
+
+  /* Grid de 3 columnas iguales, una sola fila, altura completa. El
+     orden visual de las columnas lo controlan las variables
+     --orden-fuente/--orden-produccion/--orden-chat de arriba, vía la
+     propiedad CSS `order` (funciona en grid igual que en flexbox,
+     siempre que los items NO tengan grid-column/grid-row explícitos,
+     por eso ninguna de las tres secciones de abajo fija su posición:
+     se autoubican en orden según `order`). */
+  .layout {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: var(--aoi-gap);
+  }
+
+  #aoi-fuente {
+    order: var(--orden-fuente);
+  }
+
+  #aoi-chat {
+    order: var(--orden-chat);
+  }
+
+  #aoi-produccion {
+    order: var(--orden-produccion);
+  }
+
+  .aoi {
+    background: var(--panel-bg);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .aoi-header {
+    flex: 0 0 auto;
+    padding: 16px 20px 12px 20px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .aoi-label {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  .aoi-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 20px;
+    overflow: hidden;
+  }
+
+  /* --- AOI 1: Fuente ---
+     Tamaño de fuente relativo al alto de viewport (vh), no en píxeles
+     fijos. El objetivo es que el instructivo COMPLETO quepa sin scroll
+     en la máquina real de sesión, sea cual sea su resolución. Cuando se
+     mida el monitor de la U, ajustar SOLO --fuente-instructivo hasta que
+     el texto entre completo sin activar el scroll de seguridad.
+
+     Por qué importa más que la estética: si parte del instructivo queda
+     fuera de vista, se confunde "el participante eligió no leer" con
+     "no sabía que había más texto", y eso es justamente el fenómeno que
+     el estudio mide. */
+  :root {
+    --fuente-instructivo: 12px; /* aumentado desde 0.95vh a pedido: se
+                                      buscó igualar el tamaño de letra de
+                                      producción/chat (14px fijos), pero
+                                      eso desborda en las resoluciones más
+                                      chicas probadas. 1.02vh es cerca del
+                                      máximo que mantiene margen positivo
+                                      en las 4 resoluciones de prueba
+                                      (mínimo 39px en 1280x720). Renderiza
+                                      a ~11px a 1920x1080: más grande que
+                                      antes, pero no llega a igualar los
+                                      14px de producción/chat sin scroll.
+                                      PROVISIONAL: re-medir contra el
+                                      monitor real de la U. */
+  }
+
+  #aoi-fuente .aoi-body {
+    font-family: var(--sans);
+    font-size: var(--fuente-instructivo);
+    line-height: 1.55;
+    color: var(--text);
+    overflow-y: auto; /* red de seguridad, NO el comportamiento esperado:
+                          si esto se activa, --fuente-instructivo está mal
+                          calibrado para la pantalla real (ver nota arriba) */
+  }
+
+  /* Consigna fusionada dentro de la AOI de fuente (decisión explícita:
+     ya no es una AOI separada, así que "leyó consigna" y "consultó
+     fuente" dejan de poder distinguirse como métricas independientes).
+     El separador de abajo es puramente cosmético para el participante
+     humano: no crea una región ni un fondo distinto, sigue siendo el
+     mismo bloque de scroll y el mismo fondo que el resto de la AOI. */
+  .consigna-integrada {
+    margin-bottom: 0.9em;
+    padding-bottom: 0.9em;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .consigna-integrada strong {
+    font-weight: 600;
+  }
+
+  #aoi-fuente .instructivo h3 {
+    font-size: 1.15em;
+    margin: 0 0 0.6em 0;
+  }
+
+  #aoi-fuente .instructivo h4 {
+    font-size: 1.02em;
+    margin: 1.1em 0 0.4em 0;
+    color: var(--text);
+  }
+
+  #aoi-fuente .instructivo p {
+    margin: 0 0 0.7em 0;
+  }
+
+  #aoi-fuente .instructivo p:last-child {
+    margin-bottom: 0;
+  }
+
+  #aoi-fuente .instructivo ul {
+    margin: 0 0 0.7em 0;
+    padding-left: 1.4em;
+  }
+
+  #aoi-fuente .instructivo li {
+    margin: 0 0 0.3em 0;
+  }
+
+  /* --- AOI 2: Chat --- */
+  #aoi-chat .aoi-body {
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+  }
+
+  .chat-mensajes {
+    flex: 1 1 auto;
+    overflow-y: auto; /* scroll interno permitido SOLO dentro del chat,
+                          no afecta el layout general de la página */
+    padding: 16px 20px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .chat-mensaje {
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    max-width: 88%;
+    white-space: pre-wrap;
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  .chat-mensaje-usuario {
+    background: var(--bg);
+    margin-left: auto;
+    border: 1px solid var(--rule);
+  }
+
+  .chat-mensaje-ia {
+    background: var(--panel-bg);
+    border: 1px solid var(--rule);
+  }
+
+  /* Indicador de "escribiendo...": tres puntos que parpadean en cascada
+     mientras se espera la respuesta del modelo. Usa la misma burbuja
+     visual que un mensaje de la IA para no introducir un elemento
+     nuevo en el layout. */
+  .chat-mensaje-pensando {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 14px;
+  }
+
+  .chat-mensaje-pensando span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    opacity: 0.3;
+    animation: chat-pensando-parpadeo 1.2s infinite ease-in-out;
+  }
+
+  .chat-mensaje-pensando span:nth-child(2) { animation-delay: 0.2s; }
+  .chat-mensaje-pensando span:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes chat-pensando-parpadeo {
+    0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+    40% { opacity: 1; transform: translateY(-2px); }
+  }
+
+  .chat-input-row {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 8px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--rule);
+  }
+
+  .chat-input-row textarea {
+    flex: 1 1 auto;
+    resize: none;
+    font-family: var(--sans);
+    font-size: 12px;
+    padding: 8px 10px;
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    height: 40px;
+    max-height: 120px;
+    overflow-y: auto;
+    transition: height 0.12s ease;
+  }
+
+  .chat-input-row button {
+    flex: 0 0 auto;
+    font-family: var(--sans);
+    font-size: 12px;
+    padding: 8px 16px;
+    border: 1px solid var(--rule);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .chat-input-row button:hover {
+    background: var(--rule);
+  }
+
+  /* --- AOI 3: Producción ---
+     Un solo campo de texto libre, sin controles estructurados y sin
+     verificador. La ausencia de oráculo es deliberada (las tareas
+     declarativas académicas no tienen comprobación automática) y queda
+     documentada como limitación del estudio.
+
+     El scroll interno del textarea SÍ está permitido: la AOI no se
+     mueve, solo su contenido. Es el mismo comportamiento que el editor
+     de la tarea procedimental. */
+  #aoi-produccion .aoi-body {
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .caso-descripcion {
+    flex: 0 0 auto;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--rule);
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text);
+  }
+
+  .caso-descripcion strong {
+    font-weight: 600;
+  }
+
+  .editor-declarativa {
+    flex: 1 1 auto;
+    min-height: 0;
+    font-family: var(--sans);
+    font-size: 12px;
+    line-height: 1.5;
+    padding: 12px 18px;
+    border: none;
+    outline: none;
+    resize: none;
+    overflow-y: auto; /* scroll interno dentro de la AOI: la AOI no se
+                          mueve, solo su contenido */
+    color: var(--text);
+    background: var(--panel-bg);
+  }
+
+  .fila-entregar {
+    flex: 0 0 auto;
+    padding: 8px 18px;
+    border-top: 1px solid var(--rule);
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .fila-entregar button {
+    font-family: var(--sans);
+    font-size: 12px;
+    padding: 6px 14px;
+    border: 1px solid var(--rule);
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .fila-entregar button:hover {
+    background: var(--rule);
+  }
+
+  .fila-entregar button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .mensaje-entrega {
+    flex: 0 0 auto;
+    padding: 8px 18px;
+    font-family: var(--sans);
+    font-size: 12px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--rule);
+  }
+
+  /* Scrollbars discretos: en un estudio con eye-tracking, una barra de
+     scroll gruesa o de alto contraste es un elemento visualmente
+     saliente que puede sesgar la atención del participante hacia el
+     borde donde vive. Se reduce el grosor y se reutiliza la paleta
+     neutra (--rule / --panel-bg / --text-muted) para que el scrollbar
+     se perciba como una afordancia discreta, no como un elemento que
+     compite por la atención. Sigue siendo arrastrable y visible: el
+     objetivo es discreción, no invisibilidad. Idéntico a procedimental.html. */
+  .chat-mensajes,
+  .chat-input-row textarea,
+  .editor-declarativa,
+  #aoi-fuente .aoi-body {
+    scrollbar-width: thin; /* Firefox */
+    scrollbar-color: var(--rule) var(--panel-bg); /* Firefox: pulgar, track */
+  }
+
+  .chat-mensajes::-webkit-scrollbar,
+  .chat-input-row textarea::-webkit-scrollbar,
+  .editor-declarativa::-webkit-scrollbar,
+  #aoi-fuente .aoi-body::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .chat-mensajes::-webkit-scrollbar-track,
+  .chat-input-row textarea::-webkit-scrollbar-track,
+  .editor-declarativa::-webkit-scrollbar-track,
+  #aoi-fuente .aoi-body::-webkit-scrollbar-track {
+    background: var(--panel-bg);
+  }
+
+  .chat-mensajes::-webkit-scrollbar-thumb,
+  .chat-input-row textarea::-webkit-scrollbar-thumb,
+  .editor-declarativa::-webkit-scrollbar-thumb,
+  #aoi-fuente .aoi-body::-webkit-scrollbar-thumb {
+    background-color: var(--rule);
+    border-radius: 3px;
+  }
+
+  .chat-mensajes::-webkit-scrollbar-thumb:hover,
+  .chat-input-row textarea::-webkit-scrollbar-thumb:hover,
+  .editor-declarativa::-webkit-scrollbar-thumb:hover,
+  #aoi-fuente .aoi-body::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-muted);
+  }
+</style>
+</head>
+<body>
+
+  <div class="pagina">
+
+    <div class="layout">
+
+      <section id="aoi-fuente" class="aoi">
+        <div class="aoi-header">
+          <div class="aoi-label">Fuente</div>
+        </div>
+        <div class="aoi-body" id="contenido-fuente">
+          <div class="consigna-integrada" id="texto-consigna">El panel izquierdo contiene un instructivo del método AMEF. Aplica ese método al caso del panel de producción, siguiendo los cuatro puntos indicados ahí. El asistente de IA está disponible y debes consultarlo al menos una vez. Tienes 12 minutos. El chat de IA <strong>no ve automáticamente</strong> tu respuesta ni este enunciado.</div>
+          <div class="instructivo">
+            <h3>El AMEF: anticipar fallas antes de que ocurran</h3>
+            <p>El Análisis de Modo y Efecto de Falla (AMEF) es un método de gestión de calidad que sirve para identificar las vulnerabilidades de un proceso antes de que se conviertan en problemas reales. En lugar de reaccionar cuando el daño ya ocurrió, el equipo examina cada etapa por separado y se pregunta de qué manera específica podría desviarse de lo esperado.</p>
+
+            <h4>Modo, efecto y causa</h4>
+            <p>El método articula tres conceptos que conviene distinguir con cuidado, porque es fácil confundirlos entre sí.</p>
+            <p>El <strong>modo de falla</strong> es la manera concreta en que una etapa se desvía de su funcionamiento esperado. Se enuncia siempre desde la etapa que se está analizando.</p>
+            <p>El <strong>efecto</strong> es la consecuencia que esa desviación produce sobre el cliente o sobre las etapas que vienen después.</p>
+            <p>La <strong>causa</strong> es el origen que la produce, y suele estar en las condiciones de trabajo de esa misma etapa: un equipo mal calibrado, un procedimiento ambiguo, personal sin capacitación.</p>
+            <p>Antes de escribir cualquier fila, hay que fijar con claridad en qué etapa se está trabajando: el modo de falla se enuncia siempre desde esa etapa, y su efecto describe lo que ocurre después.</p>
+            <p>De ese mismo principio se desprende una consecuencia práctica: los efectos se propagan siempre hacia adelante en el proceso, nunca hacia atrás. Una etapa no puede afectar a otra que ya ocurrió, ni se registra el efecto sobre la etapa donde se origina la falla.</p>
+
+            <h4>Severidad</h4>
+            <p>Cada modo de falla se clasifica en una de tres categorías, según el impacto que su efecto tiene sobre el cliente.</p>
+            <ul>
+              <li><strong>Crítica:</strong> el cliente pierde su producto, lo recibe inservible, o queda expuesto a un riesgo de seguridad.</li>
+              <li><strong>Moderada:</strong> el cliente debe repetir el servicio, esperar de nuevo o reclamar para obtener lo que pagó.</li>
+              <li><strong>Leve:</strong> el cliente percibe una molestia o una demora, pero termina recibiendo el servicio que esperaba.</li>
+            </ul>
+
+            <h4>Regla de prioridad</h4>
+            <p>Jerarquizar los modos de falla establece el orden en que se corrige el proceso. La regla tiene dos pasos. Se atiende primero el modo de falla clasificado como <strong>Crítico</strong>. Si ninguno es Crítico, o si hay más de uno, se atiende el que ocurre en la <strong>etapa más temprana</strong> del proceso, porque sus efectos alcanzan a un número mayor de etapas posteriores.</p>
+            <p>Un AMEF riguroso no requiere extensión: basta con que cada modo de falla quede correctamente anclado a su etapa, con su efecto y su causa, y que la priorización se derive de la regla y no de la intuición del evaluador.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="aoi-chat" class="aoi">
+        <div class="aoi-header">
+          <div class="aoi-label">Chat de IA</div>
+        </div>
+        <div class="aoi-body">
+          <div class="chat-mensajes" id="chat-mensajes">
+            <!-- Mensajes del participante y respuestas del modelo se insertan aquí -->
+          </div>
+          <div class="chat-input-row">
+            <textarea id="chat-input" placeholder="Escribe tu pregunta..."></textarea>
+            <button id="chat-enviar">Enviar</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="aoi-produccion" class="aoi">
+        <div class="aoi-header">
+          <div class="aoi-label">Producción</div>
+        </div>
+        <div class="aoi-body">
+          <div class="caso-descripcion">
+            <strong>Caso.</strong> Una lavandería de autoservicio ofrece un servicio nuevo: el cliente deja su ropa en recepción, el personal la lava, la seca, la dobla y el cliente la recoge el mismo día con un ticket numerado. El proceso tiene cinco etapas: <strong>(1)</strong> recepción y etiquetado, <strong>(2)</strong> lavado, <strong>(3)</strong> secado, <strong>(4)</strong> doblado y empaque, <strong>(5)</strong> entrega contra ticket. Se te asignan las etapas 2 y 3.
+          </div>
+          <textarea class="editor-declarativa" id="editor-declarativa" spellcheck="false">1. MODOS DE FALLA
+
+Etapa 2 (Lavado)
+Modo de falla:
+Efecto:
+Causa:
+
+Etapa 3 (Secado)
+Modo de falla:
+Efecto:
+Causa:
+
+
+2. PROPAGACIÓN
+¿A qué etapas posteriores alcanza el efecto de cada modo de falla?
+
+
+3. SEVERIDAD
+Clasifica cada modo de falla según las categorías del instructivo.
+
+
+4. PRIORIDAD
+¿Cuál atenderías primero? Aplica la regla del instructivo.</textarea>
+          <div class="fila-entregar">
+            <button id="btn-entregar">Entregar</button>
+          </div>
+          <div class="mensaje-entrega" id="mensaje-entrega" style="display:none;"></div>
+        </div>
+      </section>
+
+    </div>
+
+  </div>
+
+  <script src="/comun.js"></script>
+  <script src="/declarativa.js"></script>
+</body>
+</html>

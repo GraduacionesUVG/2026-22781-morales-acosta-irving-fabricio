@@ -1,0 +1,1132 @@
+---
+title: "resolver_sin_leer"
+author: "fabricio_acosta"
+date: "2026-09-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# 0. Configuración
+## Paquetes
+```{r paquetes, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lmerTest)
+library(readxl)
+library(pwr)
+library(MASS)
+select <- dplyr::select
+```
+
+##Cargar archivo
+```{r datps}
+datos <- read_csv("tabla_final_R.csv", na = "NA", show_col_types = FALSE)
+dim(datos)
+```
+Se importó el archivo generado previamente que integra la data extraída de las sesiones.
+#1. Análisis exploratorio
+## Mirar la tabla
+
+```{r mirar}
+glimpse(datos)
+```
+Muestra una línea por columna, con su tipo y los primeros valores. Las columnas son:
+participante, tarea, fix_num: quién es, cuál tarea (procedimental o declarativa) y el número de la fijación en la grabación.
+AOI: la zona de la pantalla (Fuente, ChatIA, Produccion, o OUTSIDE si cayó fuera de las tres).
+fase: aplicación, formulación o lectura (solo tienen Producción y ChatIA).
+duracion_fijacion: cuánto duró la fijación, en segundos.
+InterfixDur, InterfixDegree: duración y ángulo del salto del ojo que llegó a esa fijación.
+tipo_intervalo: si ese intervalo es un salto o un parpadeo.
+PupilDiam: diámetro de la pupila, con NA si no se midió.
+PupilLoss, InterfixPupilLoss: tiempo de pupila perdida dentro de la fijación y dentro del intervalo previo.
+## OUTSIDE y las tres AOI
+```{r outside}
+# Calidad: qué porcentaje de fijaciones cayó fuera de las 3 AOI
+datos %>%
+  count(AOI) %>%
+  mutate(porcentaje = round(100 * n / sum(n), 1))
+
+# De aquí en adelante se trabaja solo con las 3 AOI de interés
+datos_aoi <- datos %>% filter(AOI != "OUTSIDE")
+nrow(datos_aoi)
+```
+Se calculó el porcentaje de fijaciones que se asignó a cada AOI. Los que cayeron "OUTSIDE" significa que no pertenecen a ninguno de los tres (el participante estaba viendo afuera de la pantalla), estos no serán tomados en cuenta pra el análisis.
+## Resumen de las variables numéricas
+```{r numericas}
+datos_aoi %>%
+  dplyr::select(duracion_fijacion, InterfixDur, InterfixDegree, PupilDiam) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "valor") %>%
+  group_by(variable) %>%
+  summarise(
+    n       = sum(!is.na(valor)),
+    minimo  = min(valor, na.rm = TRUE),
+    q1      = quantile(valor, 0.25, na.rm = TRUE),
+    mediana = median(valor, na.rm = TRUE),
+    media   = mean(valor, na.rm = TRUE),
+    q3      = quantile(valor, 0.75, na.rm = TRUE),
+    maximo  = max(valor, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+```
+Esta tabla resume las cuatro variables numéricas de interés antes de cualquier comparación entre tareas o áreas de interés. Se calcularon la mediana y los cuartiles (q1, q3) además de la media, porque la media por sí sola puede resultar engañosa cuando la distribución tiene una cola larga.
+La columna n indica cuántas fijaciones tienen dato válido en cada variable.
+## Cómo se distribuyen
+```{r histogramas}
+datos_aoi %>%
+  select(duracion_fijacion, InterfixDur, InterfixDegree, PupilDiam) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "valor") %>%
+  ggplot(aes(x = valor)) +
+  geom_histogram(bins = 40, na.rm = TRUE) +
+  facet_wrap(~ variable, scales = "free") +
+  labs(x = NULL, y = "número de fijaciones")
+```
+Las cuatro variables muestran una asimetría marcada hacia la derecha: la mayoría de los valores se concentra en un rango bajo, con una cola de valores considerablemente más altos que se extiende hacia la derecha.Esto es consistente con lo observado en la tabla de resumen anterior, donde la media superaba a la mediana en las variables con mayor asimetría.
+## Preparar variables para el análisis
+```{r preparar}
+datos_aoi <- datos_aoi %>%
+  mutate(
+    num_part = as.integer(str_remove(participante, "P")),
+    orden = if_else(num_part <= 14, "procedimental primero", "declarativa primero"),
+    across(c(participante, tarea, AOI, fase, orden, tipo_intervalo), as.factor)
+  ) %>%
+  select(-num_part)
+
+# cuántos participantes hay en cada orden
+datos_aoi %>% distinct(participante, orden) %>% count(orden)
+```
+Se convirtieron las variables en factores para proceder con el análisis de efectos mixtos. Además se muestra el total personas que hicieron primero la declarativa y luego la procedimental.
+Antes de ajustar cualquier modelo, se creó la columna `orden` a partir del número de participante (P01 a P14 hicieron primero la tarea procedimental, P15 en adelante hicieron primero la declarativa, según el contrabalanceo original) y se convirtieron a factor las variables categóricas (`participante`, `tarea`, `AOI`, `fase`, `orden`, `tipo_intervalo`), formato que requieren los modelos de efectos mixtos para tratarlas como grupos y no como texto libre. Además se muestra el total de personas que hicieron primero la declarativa y luego la procedimental, y viceversa.
+# 2. Objetivo 1: fijaciones, sacadas y pupila por AOI y fase
+## Fijaciones por participante y tarea
+```{r conteo}
+conteo <- datos_aoi %>%
+  count(participante, tarea) %>%
+  pivot_wider(names_from = tarea, values_from = n)
+
+conteo                                                    # todos
+```
+Se muestra el total de sacadas calculadas por participante y tarea. 
+## Resumen por tarea y AOI
+```{r resumen}
+datos_aoi %>%
+  group_by(tarea, AOI) %>%
+  summarise(
+    fijaciones     = n(),
+    duracion_media = round(mean(duracion_fijacion), 3),
+    pupila_media   = round(mean(PupilDiam, na.rm = TRUE), 2),
+    .groups = "drop"
+  )
+```
+Se muestra la cantidad de fijaciones, duracion_media y diametro pupilar medio por tarea y AOI.
+## 7. Dónde miran en cada tarea
+```{r grafico}
+datos_aoi %>%
+  count(tarea, AOI) %>%
+  group_by(tarea) %>%
+  mutate(porcentaje = 100 * n / sum(n)) %>%
+  ggplot(aes(x = AOI, y = porcentaje, fill = tarea)) +
+  geom_col(position = "dodge") +
+  labs(x = "Zona de la pantalla (AOI)", y = "% de fijaciones", fill = "Tarea")
+```
+A través del gráfico de barras se hace un conteo de la cantidad de fijaciones por tarea. Se observa como en la declarativa predomina notablemente el área de producción, mientras que en la procedimental predomina el área de fuente. El chat de IA apenas aprece en la declarativa, mientras que en la de procedimental está casi igualado con la producción.
+## Qué se mide en cada combinación de AOI y fase
+```{r objetivo1}
+datos_aoi <- datos_aoi %>%
+  mutate(celda = case_when(
+    AOI == "Fuente"                         ~ "Fuente",
+    AOI == "Produccion"                     ~ "Producción (aplicación)",
+    AOI == "ChatIA" & fase == "formulacion" ~ "Chat de IA (formulación)",
+    AOI == "ChatIA" & fase == "lectura"     ~ "Chat de IA (lectura)",
+    TRUE                                    ~ NA_character_
+  ))
+
+resumen_obj1 <- datos_aoi %>%
+  filter(!is.na(celda)) %>%
+  group_by(tarea, celda) %>%
+  summarise(
+    fijaciones        = n(),
+    duracion_fijacion = round(median(duracion_fijacion), 3),
+    salto_grados      = round(median(InterfixDegree[tipo_intervalo == "salto"], na.rm = TRUE), 2),
+    pupila            = round(median(PupilDiam, na.rm = TRUE), 2),
+    .groups = "drop"
+  )
+
+resumen_obj1
+```
+Se organizaron las fijaciones en las cuatro combinaciones reales de AOI y fase: Fuente (sin fase asignada), Producción (siempre en fase de aplicación), y Chat de IA dividido en formulación y lectura. Para cada una de las ocho combinaciones de tarea y celda se calculó la mediana de duración de fijación, amplitud de sacada y diámetro pupilar, además del número de fijaciones. Esta tabla es la base del gráfico y la descripción que siguen a continuación.
+## Gráfico por celda, tarea y métrica
+```{r objetivo1_grafico}
+etiquetas_metrica <- c(
+  duracion_fijacion = "Duración de fijación (s)",
+  salto_grados      = "Amplitud de sacada (°)",
+  pupila            = "Diámetro pupilar (mm)"
+)
+
+resumen_obj1 %>%
+  pivot_longer(cols = c(duracion_fijacion, salto_grados, pupila),
+               names_to = "metrica", values_to = "valor") %>%
+  mutate(
+    metrica = factor(metrica, levels = names(etiquetas_metrica),
+                     labels = etiquetas_metrica),
+    celda = factor(celda, levels = c("Chat de IA (formulación)",
+                                     "Chat de IA (lectura)",
+                                     "Fuente",
+                                     "Producción (aplicación)"))
+  ) %>%
+  ggplot(aes(x = celda, y = valor, fill = tarea)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ metrica, scales = "free_y", ncol = 1) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 14)) +
+  labs(x = "Celda de análisis", y = "Mediana", fill = "Tarea")
+ggsave("figuras/resultados/objetivo1.pdf", width = 7, height = 8, dpi = 300)
+```
+En la tarea declarativa, la myor parte de las fijaciones se concentró en Producción (660) y Fuente (384), mientras que el Chat de Ia obtuvo menos fijaciones, principalmente en la dase de formulación (62). En la tarea procedimental, la distribución fue más pareja entre las cuatro celdascon Fuente (438) y Producción (345) como las más frecuentes, y el Chat de IA con una cantidad similar entre formulación (147) y lectura (145).
+La duración típica de la fijación se mantuvo entre 0.20 y 0.24 segundos en todas las celdas, sin una diferencia marcada entre AOI ni entre tareas. La amplitud de sacada osciló entre 2.0 y 2.4 grados, con el valor más alto en Chat de IA (lectura) durante la tarea procedimental (2.44°). El diámetro pupilar fue mayor en Chat de IA (formulación) durante la tarea declarativa (3.77 mm) y menor en Chat de IA (lectura) durante la tarea procedimental (2.98 mm).
+## ¿La duración de fijación cambia entre formulación y lectura en el Chat de IA?
+```{r modelo_fase_duracion}
+chat_ia <- datos_aoi %>% filter(AOI == "ChatIA", !is.na(fase))
+
+modelo_fase_duracion <- lmer(duracion_fijacion ~ fase + (1 | participante), data = chat_ia)
+summary(modelo_fase_duracion)
+```
+Se ajustó un modelo de efectos mixtos para evaluar si la duración de la fijación varía entre las fases de formulación y lectura dentro del Chat de IA (n = 457 fijaciones, 23 participantes). No se encontró una diferencia significativa entre fases (β = 0.006, EE = 0.026, t(449.5) = 0.226, p = 0.821), lo que sugiere que la duración de fijación no distingue estos dos momentos de interacción con la IA.
+## La duración de fijación cambia entre las tres AOI?
+```{r modelo_aoi_duracion}
+modelo_aoi_duracion <- lmer(duracion_fijacion ~ AOI + (1 | participante), data = datos_aoi)
+summary(modelo_aoi_duracion)
+```
+Se ajustó un modelo de efectos mixtos para comparar la duración de fijación entre las tres áreas de interés (Fuente, Chat de IA y Producción; n = 2288 fijaciones, 24 participantes), sin encontrar diferencias significativas: Fuente no difirió de Chat de IA (β = -0.023, p = 0.109) y Producción tampoco difirió de Chat de IA (β = -0.002, p = 0.870).
+## La amplitud de sacada cambia entre las tres AOI?
+```{r modelo_aoi_sacada}
+solo_saltos <- datos_aoi %>% filter(tipo_intervalo == "salto")
+
+modelo_aoi_sacada <- lmer(InterfixDegree ~ AOI + (1 | participante), data = solo_saltos)
+summary(modelo_aoi_sacada)
+```
+Se ajustó un modelo de efectos mixtos para comparar la amplitud de sacada entre las tres áreas de interés (n = 2028 sacadas válidas, 24 participantes), sin encontrar diferencias significativas: Fuente no difirió de Chat de IA (β = -0.031, EE = 0.324, p = 0.924) y Producción tampoco difirió de Chat de IA (β = 0.362, EE = 0.309, p = 0.242).
+## Objetivo 1: ¿la pupila cambia entre las tres AOI?
+```{r modelo_aoi_pupila}
+modelo_aoi_pupila <- lmer(PupilDiam ~ AOI + (1 | participante), data = datos_aoi)
+summary(modelo_aoi_pupila)
+```
+Los mismos modelos se replicaron con la amplitud de sacada y el diámetro pupilar como variables dependientes. Ninguna mostró diferencias significativas entre las tres áreas de interés: la amplitud de sacada no difirió entre Fuente y Chat de IA (β = -0.031, p = 0.924) ni entre Producción y Chat de IA (β = 0.362, p = 0.242); el diámetro pupilar tampoco difirió entre Fuente y Chat de IA (β = 0.038, p = 0.384) ni entre Producción y Chat de IA (β = -0.025, p = 0.546). En conjunto, ninguna de las tres métricas analizadas mostró diferencias significativas entre las áreas de interés.
+## ¿El efecto de la AOI depende de la tarea?
+
+```{r modelo_aoi_tarea_duracion}
+modelo_aoi_tarea_duracion <- lmer(duracion_fijacion ~ AOI * tarea + (1 | participante),
+                                   data = datos_aoi)
+summary(modelo_aoi_tarea_duracion)
+```
+Al incorporar la interacción entre AOI y tarea, ninguna de las dos interacciones fue significativa: el efecto de Fuente respecto a Chat de IA no cambió entre tareas (β = 0.002, p = 0.957), y el de Producción tampoco (β = -0.046, p = 0.106). Esto indica que la relación entre duración de fijación y área de interés se mantiene similar en ambas modalidades de tarea.
+
+```{r modelo_aoi_tarea_sacada}
+modelo_aoi_tarea_sacada <- lmer(InterfixDegree ~ AOI * tarea + (1 | participante),
+                                 data = solo_saltos)
+summary(modelo_aoi_tarea_sacada)
+```
+De igual forma, ninguna interacción entre AOI y tarea fue significativa para la amplitud de sacada: Fuente (β = 0.391, p = 0.551) y Producción (β = 0.964, p = 0.134) mostraron un comportamiento similar respecto a Chat de IA en ambas tareas.
+
+```{r modelo_aoi_tarea_pupila}
+modelo_aoi_tarea_pupila <- lmer(PupilDiam ~ AOI * tarea + (1 | participante),
+                                 data = datos_aoi)
+summary(modelo_aoi_tarea_pupila)
+```
+Tampoco se encontraron interacciones significativas para el diámetro pupilar: Fuente (β = 0.102, p = 0.249) y Producción (β = 0.016, p = 0.851) no mostraron un efecto distinto según la tarea. 
+En conjunto, al separar por tarea el análisis del objetivo 1, ninguna de las tres métricas mostró que el efecto de las áreas de interés dependiera del tipo de tarea. Esto confirma que la ausencia de diferencias entre áreas de interés, encontrada previamente al analizar ambas tareas en conjunto, no está enmascarando patrones opuestos entre modalidades: la intensidad del procesamiento (duración de fijación, amplitud de sacada, diámetro pupilar) se mantiene comparable entre Fuente, Chat de IA y Producción, tanto en la tarea declarativa como en la procedimental.
+# 3. Construcción del índice compuesto de procesamiento cognitivo
+## Covarianza entre fijaciones, sacadas y pupila
+
+```{r covarianza}
+cov_datos <- datos_aoi %>%
+  group_by(participante, tarea) %>%
+  summarise(
+    duracion_fijacion = median(duracion_fijacion),
+    salto_grados      = median(InterfixDegree[tipo_intervalo == "salto"], na.rm = TRUE),
+    pupila            = median(PupilDiam, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# correlación entre las tres medidas (Spearman: menos sensible a valores extremos)
+cov_datos %>%
+  select(duracion_fijacion, salto_grados, pupila) %>%
+  cor(method = "spearman", use = "pairwise.complete.obs") %>%
+  round(2)
+```
+Se calculó el criterio de covarianza exigido para el índice. Se calculó la correlación de Spearman entre las tres métricas usando la mediana de cada participante en cada tarea. Se usó Spearman en lugar de pearson por no asumir una relación lineal y menos sensible a valores extremos.
+## ¿Las correlaciones son significativas?
+```{r covarianza_test}
+t1 <- cor.test(cov_datos$duracion_fijacion, cov_datos$pupila, method = "spearman")
+t2 <- cor.test(cov_datos$salto_grados, cov_datos$pupila, method = "spearman")
+t3 <- cor.test(cov_datos$duracion_fijacion, cov_datos$salto_grados, method = "spearman")
+
+resultado <- tibble(
+  par           = c("duracion_fijacion - pupila", "salto_grados - pupila",
+                     "duracion_fijacion - salto_grados"),
+  rho           = round(c(t1$estimate, t2$estimate, t3$estimate), 2),
+  p_valor       = round(c(t1$p.value, t2$p.value, t3$p.value), 3),
+  significativo = p_valor < 0.05
+)
+
+resultado
+```
+Se evaluó la significancia de cada correlación mediante una prueba de hipótesis. La duración de fijación se relacionó de forma significativa y positiva con el diámetro pupilar (ρ = 0.34, p = 0.018), y la amplitud de sacada se relacionó de forma significativa y negativa con el diámetro pupilar (ρ = -0.30, p = 0.040). En cambio, no se encontró una relación significativa entre la duración de fijación y la amplitud de sacada (ρ = -0.12, p = 0.407). Estos resultados indican que las tres métricas no covarían entre sí de forma uniforme: el diámetro pupilar actúa como el vínculo común entre las otras dos, mientras que la duración de fijación y la amplitud de sacada no se relacionan de forma directa entre ellas.
+## Índice compuesto (formativo) por participante y tarea
+```{r indice}
+indice <- cov_datos %>%
+  mutate(
+    z_fijacion = as.numeric(scale(duracion_fijacion)),
+    z_sacada   = as.numeric(scale(salto_grados)) * -1,   # se voltea: sacada chica = más carga
+    z_pupila   = as.numeric(scale(pupila)),
+    indice_pc  = rowMeans(cbind(z_fijacion, z_sacada, z_pupila), na.rm = TRUE)
+  )
+
+# cuántos participantes-tarea tienen alguna pieza faltante
+indice %>% filter(is.na(z_fijacion) | is.na(z_sacada) | is.na(z_pupila)) %>%
+  select(participante, tarea, z_fijacion, z_sacada, z_pupila)
+
+indice %>% arrange(desc(indice_pc)) %>% select(participante, tarea, indice_pc)
+```
+Se utilizó la puntuación z para conocer qué tan lejos están los valores del promedio de su grupo (en este caso, tipo de tarea), en una escala que sirve para comparar cosas distintas entre sí.
+Un valor positivo significa "por encima del promedio"
+Un valor negativo significa "por debajo del promedio"
+0 siginifica "justo en el promedio"
+Dado que las tres variables se miden con distinta dimensional (segundos,grados y milímetros) no es lógico sumarla en ese estado. Para ello se convierten a su puntuación Z, donde el resultado estaría en la misma escala y tendría sentido sumarlas.
+La puntuación Z se calculá con el promedio y la desviación estándar.
+Para las sacadas, se multiplica por *-1 dado que está invertido a lo establecido de la pupila. Una sacaad más chica va con ás carga, al revés que la fijación y la pupila. Al voltear el signo, un participante con sacada chica (que antes daba un número negativo) pasa a tener z_sacada positivo, en la misma dirección que las otras dos piezas del índice.
+Una vez obtenidos las tres puntuaciones Z, se sumaban y dividian entre 3, separando por participante y tarea. 
+0 significa que esa persona, en esa tarea, está justo en el punto promedio de las 48 combinaciones de participante y tarea. Ni por encima ni por debajo.
+Positivo significa que, en conjunto, esa combinación tuvo más de lo que el índice interpreta como carga: fijaciones más largas que el promedio, sacadas más chicas que el promedio y pupila más dilatada que el promedio. Cuanto más grande el número, más se aleja del promedio en esa dirección.
+Negativo es lo contrario: fijaciones más cortas, sacadas más grandes y pupila menos dilatada que el promedio del grupo.
+# 4. Exploración adicional
+Esta sección reúne preguntas que no estaban planteadas en el diseño original, pero que surgieron al revisar los datos y la observación cualitativa hecha durante el piloto (ver Discusión, sección 7.1.1), donde se describió que los estudiantes resolvían la tarea procedimental con un ciclo de copiar y pegar respuestas del chat, mientras que en la declarativa consultaban la IA con menor frecuencia y de forma más tardía.
+## ¿Cambia la proporción de atención en Chat de IA entre tareas?
+```{r modelo_proporcion_chatia}
+datos_aoi <- datos_aoi %>% mutate(es_chatia = as.numeric(AOI == "ChatIA"))
+
+modelo_prop_chatia <- glmer(es_chatia ~ tarea + (1 | participante),
+                             data = datos_aoi, family = binomial)
+summary(modelo_prop_chatia)
+
+exp(fixef(modelo_prop_chatia))
+```
+Se ajustó un modelo lineal generalizado mixto (familia binomial) para evaluar si la probabilidad de que una fijación cayera en el Chat de IA cambiaba entre tareas. Se encontró una diferencia significativa: en la tarea procedimental, las fijaciones tuvieron 2.55 veces más probabilidad de caer en el Chat de IA que en la tarea declarativa (β = 0.935, EE = 0.113, z = 8.254, p < .001).
+## ¿Cambia la proporción de atención en Producción entre tareas?
+```{r modelo_proporcion_produccion}
+datos_aoi <- datos_aoi %>% mutate(es_produccion = as.numeric(AOI == "Produccion"))
+
+modelo_prop_produccion <- glmer(es_produccion ~ tarea + (1 | participante),
+                                 data = datos_aoi, family = binomial)
+summary(modelo_prop_produccion)
+
+exp(fixef(modelo_prop_produccion))
+```
+Se ajustó el mismo tipo de modelo para evaluar la probabilidad de que una fijación cayera en el área de Producción. Se encontró una diferencia significativa en la dirección opuesta a la observada en el Chat de IA: en la tarea procedimental, las fijaciones tuvieron 0.38 veces la probabilidad de caer en Producción respecto a la tarea declarativa (β = -0.973, EE = 0.090, z = -10.864, p < .001), es decir, una reducción de aproximadamente 62% en la probabilidad.
+
+En conjunto, estos resultados muestran que, si bien no se encontraron diferencias significativas en la intensidad del procesamiento cognitivo (duración de fijación, amplitud de sacada, diámetro pupilar) entre las tareas procedimental y declarativa, sí se encontró una diferencia significativa y de magnitud considerable en la distribución de la atención visual entre las áreas de interés: la tarea procedimental concentra una mayor proporción de la atención en el Chat de IA, mientras que la tarea declarativa la concentra en el área de Producción.
+## Gráfico: proporción de atención por AOI y tarea
+```{r grafico_proporcion_aoi}
+datos_aoi %>%
+  count(tarea, AOI) %>%
+  group_by(tarea) %>%
+  mutate(porcentaje = 100 * n / sum(n)) %>%
+  ungroup() %>%
+  mutate(AOI = factor(AOI,
+                      levels = c("Fuente", "ChatIA", "Produccion"),
+                      labels = c("Fuente", "Chat de IA", "Producción"))) %>%
+  ggplot(aes(x = AOI, y = porcentaje, fill = tarea)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = sprintf("%.1f%%", porcentaje)),
+            position = position_dodge(width = 0.9), vjust = -0.3) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+  labs(x = "Área de interés", y = "% de fijaciones", fill = "Tarea")
+ggsave("figuras/resultados/distribucion_atencion.pdf", width = 7, height = 5, dpi = 300)
+```
+La Figura muestra la distribución porcentual de fijaciones por área de interés en cada tarea. Se observa un patrón inverso entre el Chat de IA y Producción: mientras que en la tarea declarativa predomina la atención sobre Producción (54.5%) por encima del Chat de IA (13.7%), en la tarea procedimental esta brecha se reduce sustancialmente (40.6% en Fuente y 32.0% en Producción, frente a 27.4% en Chat de IA), reflejando una mayor consulta al asistente de IA. La proporción de fijaciones en Fuente también varió entre tareas (31.7% en declarativa, 40.6% en procedimental), aunque este cambio no fue modelado de forma independiente por derivarse matemáticamente de los otros dos, dado que las tres proporciones suman 100% en cada tarea.
+
+## Atención por tercio de la tarea (inicio, mitad, fin)
+
+
+```{r atencion_por_tercio}
+atencion_tiempo <- datos_aoi %>%
+  group_by(participante, tarea) %>%
+  mutate(tercio = ntile(fix_num, 3),
+         tercio = factor(tercio, levels = 1:3, labels = c("Inicio", "Mitad", "Fin"))) %>%
+  ungroup() %>%
+  count(tarea, tercio, AOI) %>%
+  group_by(tarea, tercio) %>%
+  mutate(porcentaje = 100 * n / sum(n)) %>%
+  ungroup() %>%
+  mutate(AOI = factor(AOI,
+                      levels = c("Fuente", "ChatIA", "Produccion"),
+                      labels = c("Fuente", "Chat de IA", "Producción")))
+
+ggplot(atencion_tiempo, aes(x = tercio, y = porcentaje, fill = AOI)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ tarea) +
+  labs(x = "Tercio de la tarea", y = "% de fijaciones", fill = "Área de interés")
+ggsave("figuras/resultados/tercios_atencion.pdf", width = 8, height = 5, dpi = 300)
+```
+Al dividir cada tarea en tercios según el orden de las fijaciones muestreadas, se observó que ambas tareas comienzan concentradas en Fuente (63% en declarativa, 69% en procedimental), consistente con una fase inicial de lectura del material. Hacia el final, la tarea declarativa se concentra en Producción (69%), mientras que la procedimental distribuye la atención de forma más pareja entre las tres áreas, con el Chat de IA alcanzando su mayor proporción en el tercio final (38%). Este patrón sugiere que, en la tarea procedimental, el uso del asistente de IA se intensifica hacia el cierre de la tarea, posiblemente asociado a la verificación del código, mientras que en la declarativa la fase final se concentra en la redacción de la respuesta.
+## Secuencia aproximada de AOI (qué sigue después de cada AOI)
+
+```{r secuencia_aoi}
+transiciones <- datos_aoi %>%
+  arrange(participante, tarea, fix_num) %>%
+  group_by(participante, tarea) %>%
+  mutate(AOI_siguiente = lead(AOI)) %>%
+  ungroup() %>%
+  filter(!is.na(AOI_siguiente))
+
+tabla_transiciones <- transiciones %>%
+  count(tarea, AOI, AOI_siguiente) %>%
+  group_by(tarea, AOI) %>%
+  mutate(porcentaje = round(100 * n / sum(n), 1)) %>%
+  ungroup()
+
+tabla_transiciones %>% arrange(tarea, AOI, desc(porcentaje))
+
+tabla_transiciones %>%
+  mutate(across(c(AOI, AOI_siguiente),
+                ~ factor(.x, levels = c("Fuente", "ChatIA", "Produccion"),
+                         labels = c("Fuente", "Chat de IA", "Producción")))) %>%
+  ggplot(aes(x = AOI_siguiente, y = AOI, fill = porcentaje)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(porcentaje, "%"))) +
+  facet_wrap(~ tarea) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(x = "Siguiente punto muestreado", y = "Área de interés actual", fill = "%")
+ggsave("figuras/resultados/transiciones_aoi.pdf", width = 8, height = 4, dpi = 300)
+```
+Se examinó la secuencia entre puntos muestreados consecutivos como aproximación al recorrido de atención entre áreas de interés. Los resultados muestran que el destino tras consultar el Chat de IA difiere entre tareas: en la tarea declarativa, el 41.7% de las transiciones desde el Chat de IA se dirigieron a Producción, un patrón cercano al flujo esperado de consulta y aplicación. En la tarea procedimental, en cambio, la transición más frecuente desde el Chat de IA fue permanecer en la misma área (63.0%), y solo el 26.3% se dirigió a Producción, lo que sugiere un patrón de consulta más iterativo o de verificación repetida dentro del chat, antes que un flujo directo de consulta-aplicación. Se advierte que esta secuencia se construye entre puntos muestreados (separados en promedio por al menos 5 segundos), no entre fijaciones consecutivas del video completo, por lo que representa una aproximación al recorrido real de la atención.
+
+## Validación externa: ¿el índice y la proporción de atención se relacionan con el uso real del chat?
+Como chequeo adicional, se contrastaron dos de las métricas anteriores contra el número de interacciones reales con la IA registrado en cada sesión (`interacciones_ia.csv`), un dato de comportamiento independiente de las métricas oculares.
+```{r cargar_interacciones}
+interacciones <- read_csv("interacciones_ia.csv", show_col_types = FALSE)
+
+validacion <- indice %>%
+  left_join(interacciones, by = c("participante", "tarea"))
+
+cor.test(validacion$indice_pc, validacion$n_interacciones_ia, method = "spearman")
+```
+
+```{r validacion_chatia}
+prop_chatia <- datos_aoi %>%
+  group_by(participante, tarea) %>%
+  summarise(pct_chatia = 100 * mean(AOI == "ChatIA"), .groups = "drop")
+
+validacion_chatia <- prop_chatia %>%
+  left_join(interacciones, by = c("participante", "tarea"))
+
+cor.test(validacion_chatia$pct_chatia, validacion_chatia$n_interacciones_ia, method = "spearman")
+```
+Se realizaron dos análisis de validación externa. La proporción de fijaciones en el Chat de IA se relacionó de forma fuerte y significativa con el número de interacciones (ρ = 0.713, p < .001), lo que respalda la validez de la segmentación por áreas de interés. En cambio, el índice compuesto de procesamiento cognitivo no mostró relación con el número de interacciones (ρ = 0.017, p = 0.908), lo que sugiere que el índice captura la intensidad del procesamiento en el punto de mirada, un constructo distinto de la frecuencia de consulta al asistente de IA.
+# 5. Hipótesis secundaria: ¿cambia el índice entre tareas?
+## Índice por tarea, participante por participante
+
+```{r indice_grafico}
+ggplot(indice, aes(x = tarea, y = indice_pc, group = participante)) +
+  geom_line(alpha = 0.4) +
+  geom_point() +
+  labs(x = NULL, y = "índice de procesamiento cognitivo")
+ggsave("figuras/resultados/indice_tareas.pdf", width = 6, height = 5, dpi = 300)
+```
+No existe un patrón claro para el índice. Las líneas suben y bajan, se cruzan entre sí y no se puede determinar a simple vista que bajen hacia procedimental o suban. Exceptuando a P02, los participantes se mueven en un rango bastante angosto, entre -1 y 1.2 aproximadamente.
+## Caso atípico: P02
+```{r indice_sin_p02}
+filter(cov_datos, participante == "P02")
+```
+El participante P02 mostró valores notablemente más altos que el resto del grupo (índice de 2.38 en declarativa, frente a un segundo lugar de 1.20). Se decidió investigar qué causaba esta desviación antes de aceptar el índice tal cual: se revisó el XML de fijaciones de P02 y se confirmó que sus fijaciones largas (mediana de 0.434 s en declarativa, contra un promedio general de 0.24 s) no tenían pérdida de pupila asociada, lo que descarta un error de anclaje o una fijación fusionada por artefacto. Además, la duración elevada de fijación fue un rasgo consistente en todo el video de P02, no un caso puntual, por lo que se conservó el dato como válido y se procedió con un análisis de sensibilidad para verificar que no alterara la conclusión general.
+## Análisis de sensibilidad: con y sin P02
+```{r sensibilidad}
+ancha <- indice %>%
+  select(participante, tarea, indice_pc) %>%
+  pivot_wider(names_from = tarea, values_from = indice_pc)
+
+wilcox.test(ancha$declarativa, ancha$procedimental, paired = TRUE)
+
+ancha_sin_p02 <- filter(ancha, participante != "P02")
+wilcox.test(ancha_sin_p02$declarativa, ancha_sin_p02$procedimental, paired = TRUE)
+```
+El análisis de sensibilidad confirmó que la fijación atípica de P02 no altera la conclusión: la comparación del índice de procesamiento cognitivo entre las tareas declarativa y procedimental no mostró diferencia significativa, tanto con los 24 participantes (V = 146, p = 0.922) como excluyendo a P02 (V = 122, p = 0.643).
+## Modelo mixto: índice según tarea
+```{r modelo_mixto}
+modelo <- lmer(indice_pc ~ tarea + (1 | participante), data = indice)
+summary(modelo)
+```
+El modelo de efectos mixtos, con la tarea como efecto fijo y el participante como efecto aleatorio, no encontró una diferencia significativa en el índice de procesamiento cognitivo entre las tareas procedimental y declarativa (β = -0.072, EE = 0.116, t(23) = -0.622, p = 0.540). La varianza entre participantes (0.30) superó a la varianza residual dentro de cada participante (0.16), lo que sugiere que las diferencias individuales explican una parte mayor de la variación en el índice que el tipo de tarea.
+## Modelo mixto sin P02
+```{r modelo_mixto_sin_p02}
+indice_sin_p02 <- filter(indice, participante != "P02")
+
+modelo_sin_p02 <- lmer(indice_pc ~ tarea + (1 | participante), data = indice_sin_p02)
+summary(modelo_sin_p02)
+```
+El análisis de sensibilidad confirmó la estabilidad del resultado: al excluir a P02 (n = 23), el modelo mixto tampoco encontró una diferencia significativa entre tareas (β = -0.007, EE = 0.101, t(22) = -0.073, p = 0.942), con una magnitud del efecto incluso menor que en el modelo con los 24 participantes (β = -0.072, p = 0.540).
+## Revisión de supuestos del modelo mixto
+```{r supuestos}
+# 1. ¿Los residuos se distribuyen de forma más o menos normal?
+qqnorm(resid(modelo), main = "Normalidad de los residuos")
+qqline(resid(modelo), col = "red")
+
+shapiro.test(resid(modelo))
+
+# 2. ¿El error es parecido en todo el rango de valores, sin ningún patrón?
+plot(fitted(modelo), resid(modelo),
+     xlab = "valores ajustados por el modelo", ylab = "residuos")
+abline(h = 0, col = "red")
+
+# 3. ¿Las diferencias entre participantes se distribuyen de forma normal?
+qqnorm(ranef(modelo)$participante[[1]], main = "Normalidad entre participantes")
+qqline(ranef(modelo)$participante[[1]], col = "red")
+```
+Se revisaron los supuestos del modelo mixto mediante inspección gráfica de los residuos. El gráfico cuantil-cuantil mostró un ajuste adecuado a la normalidad en el rango central de los datos, con desviaciones en los extremos que la prueba de Shapiro-Wilk confirmó como significativas (W = 0.947, p = 0.030), indicando colas más pesadas que las esperadas bajo normalidad. El gráfico de residuos contra valores ajustados no mostró un patrón sistemático, sin evidencia de heterocedasticidad. La desviación de la normalidad no compromete la interpretación del resultado principal del modelo.
+## Esfuerzo mental percibido (escala de Paas) entre tareas
+
+```{r esfuerzo_entre_tareas}
+esfuerzo <- read_csv("esfuerzo_mental.csv", show_col_types = FALSE)
+
+esfuerzo %>%
+  group_by(tarea) %>%
+  summarise(n = sum(!is.na(esfuerzo_paas)),
+            media = round(mean(esfuerzo_paas, na.rm = TRUE), 2),
+            mediana = median(esfuerzo_paas, na.rm = TRUE),
+            .groups = "drop")
+
+esfuerzo_ancho <- esfuerzo %>%
+  pivot_wider(names_from = tarea, values_from = esfuerzo_paas)
+
+wilcox.test(esfuerzo_ancho$declarativa, esfuerzo_ancho$procedimental, paired = TRUE)
+```
+El esfuerzo mental percibido (escala de Paas, 1 a 9) fue mayor en la tarea declarativa (M = 5.83, Mdn = 6) que en la procedimental (M = 4.87, Mdn = 5). La diferencia de medias, de 0.96 puntos, no alcanzó significancia estadística (prueba de Wilcoxon pareada, V = 191, p = 0.094, n = 23). La dirección coincide con la observada en el piloto (1.6 puntos), aunque con menor magnitud. Con el criterio de convergencia definido para el piloto (diferencia menor a 1 punto y p > 0.05), las tareas cumplirían formalmente el criterio, pero el margen es estrecho y una prueba no significativa con esta muestra no demuestra equivalencia de esfuerzo.
+## Esfuerzo percibido contra el índice y contra el puntaje de inferencia, por tarea
+
+```{r esfuerzo_correlaciones}
+correlacion_par <- function(datos, nombre, x, y) {
+  d <- datos %>% filter(!is.na(.data[[x]]), !is.na(.data[[y]]))
+  test <- suppressWarnings(cor.test(d[[x]], d[[y]], method = "spearman"))
+  tibble(comparacion = nombre, n = nrow(d),
+         rho = round(unname(test$estimate), 3), p_valor = round(test$p.value, 3))
+}
+
+validacion_esfuerzo <- esfuerzo %>%
+  left_join(dplyr::select(indice, participante, tarea, indice_pc),
+            by = c("participante", "tarea")) %>%
+  left_join(calificacion, by = c("participante", "tarea"))
+
+validacion_esfuerzo %>%
+  group_by(tarea) %>%
+  group_modify(~ bind_rows(
+    correlacion_par(.x, "esfuerzo vs índice de procesamiento", "esfuerzo_paas", "indice_pc"),
+    correlacion_par(.x, "esfuerzo vs puntaje de inferencia", "esfuerzo_paas", "puntaje_inferencia")
+  )) %>%
+  ungroup() %>%
+  mutate(significativo = p_valor < 0.05)
+```
+Como validación externa, se relacionó el esfuerzo mental percibido con el índice de procesamiento cognitivo y con el puntaje de inferencia, por tarea. Ninguna correlación fue significativa: esfuerzo e índice (declarativa: ρ = 0.106, p = 0.631, n = 23; procedimental: ρ = 0.045, p = 0.840, n = 23) y esfuerzo y puntaje de inferencia (declarativa: ρ = 0.284, p = 0.199, n = 22; procedimental: ρ = 0.168, p = 0.456, n = 22). Todas las correlaciones tuvieron signo positivo pero magnitud pequeña. Junto con la ausencia de relación entre el índice y el número de interacciones con la IA, estos resultados no aportan evidencia de validez externa para el índice compuesto, aunque el tamaño de muestra solo permite descartar relaciones fuertes.
+
+## ¿El uso del Chat de IA se relaciona con el esfuerzo mental percibido?
+
+```{r chatia_vs_esfuerzo}
+prop_chatia_esfuerzo <- prop_chatia %>%
+  left_join(esfuerzo, by = c("participante", "tarea"))
+
+prop_chatia_esfuerzo %>%
+  group_by(tarea) %>%
+  group_modify(~ correlacion_par(.x, "pct_chatia vs esfuerzo", "pct_chatia", "esfuerzo_paas")) %>%
+  ungroup()
+```
+
+## Interacciones con la IA y puntaje de inferencia, por tarea
+
+```{r interacciones_puntaje}
+validacion_interacciones <- interacciones %>%
+  left_join(calificacion, by = c("participante", "tarea"))
+
+validacion_interacciones %>%
+  group_by(tarea) %>%
+  group_modify(~ correlacion_par(.x, "interacciones con la IA vs puntaje de inferencia",
+                                 "n_interacciones_ia", "puntaje_inferencia")) %>%
+  ungroup() %>%
+  mutate(significativo = p_valor < 0.05)
+```
+Se relacionó el número de interacciones con la IA registradas en cada tarea con el puntaje de inferencia correspondiente. No se encontró una relación significativa en la tarea declarativa (ρ = -0.141, p = 0.522, n = 23) ni en la procedimental (ρ = 0.124, p = 0.573, n = 23). La escasa variabilidad del puntaje de inferencia y el carácter del indicador, que cuantifica la frecuencia de consulta pero no la forma en que se utilizó la respuesta, limitan su capacidad para distinguir entre descargo y rendición cognitiva.
+# 6. Hipótesis principal y objetivo 2: comprensión y procesamiento en la Fuente
+
+## Cargar calificaciones e índice de procesamiento en Fuente
+
+```{r calificacion_inferencia}
+calificacion <- read_excel("calificacion_inferencia.xlsx", sheet = "Calificacion") %>%
+  select(participante, tarea, puntaje_inferencia = puntaje)
+
+# Índice de procesamiento cognitivo calculado SOLO con las fijaciones en Fuente
+cov_fuente <- datos_aoi %>%
+  filter(AOI == "Fuente") %>%
+  group_by(participante, tarea) %>%
+  summarise(
+    duracion_fijacion = median(duracion_fijacion),
+    salto_grados      = median(InterfixDegree[tipo_intervalo == "salto"], na.rm = TRUE),
+    pupila            = median(PupilDiam, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+indice_fuente <- cov_fuente %>%
+  mutate(
+    z_fijacion    = as.numeric(scale(duracion_fijacion)),
+    z_sacada      = as.numeric(scale(salto_grados)) * -1,
+    z_pupila      = as.numeric(scale(pupila)),
+    indice_fuente = rowMeans(cbind(z_fijacion, z_sacada, z_pupila), na.rm = TRUE)
+  ) %>%
+  select(participante, tarea, indice_fuente)
+
+validacion_hp <- indice_fuente %>%
+  left_join(calificacion, by = c("participante", "tarea"))
+
+validacion_hp
+```
+Se cargó el archivo de calificaciones de las respuesta de inferencia.
+## Hipótesis principal: procesamiento en Fuente y puntaje de inferencia
+
+```{r hipotesis_principal}
+cor.test(validacion_hp$indice_fuente, validacion_hp$puntaje_inferencia, method = "spearman")
+```
+No se encontró una relación significativa entre el índice de procesamiento cognitivo en el área de Fuente y el puntaje obteniedo en la pregunta de inferencia posterior a la tarea (ρ = -0.051, p = 0.737, n = 23). Este resultado no respalda la hipótesis principal, que planteaba una relación positiva entre ambas variables.
+## Fuente por participante, las tres métricas
+
+```{r fuente_por_participante}
+cov_fuente %>%
+  pivot_longer(cols = c(duracion_fijacion, salto_grados, pupila),
+               names_to = "metrica", values_to = "valor") %>%
+  ggplot(aes(x = tarea, y = valor, group = participante)) +
+  geom_line(alpha = 0.4) +
+  geom_point() +
+  facet_wrap(~ metrica, scales = "free_y") +
+  labs(x = NULL, y = "mediana por participante en Fuente")
+```
+El análisis a nivel individual confirma la ausencia de un patrón consistente entre tareas para las tres métricas de Fuente: las líneas de los participantes se cruzan sin una dirección dominante, consistente con la falta de interacción significativa entre AOI y tarea encontrada en el modelo mixto. Se observan casos individuales con cambios marcados (por ejemplo, en la duración de fijación y en la amplitud de sacada), pero corresponden a participantes aislados y no a una tendencia del grupo.
+## Exploratorio: lo mismo para Producción y Chat de IA
+
+```{r indices_otras_aoi}
+calcular_indice_aoi <- function(aoi_nombre) {
+  datos_aoi %>%
+    filter(AOI == aoi_nombre) %>%
+    group_by(participante, tarea) %>%
+    summarise(
+      duracion_fijacion = median(duracion_fijacion),
+      salto_grados      = median(InterfixDegree[tipo_intervalo == "salto"], na.rm = TRUE),
+      pupila            = median(PupilDiam, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      z_fijacion = as.numeric(scale(duracion_fijacion)),
+      z_sacada   = as.numeric(scale(salto_grados)) * -1,
+      z_pupila   = as.numeric(scale(pupila)),
+      indice     = rowMeans(cbind(z_fijacion, z_sacada, z_pupila), na.rm = TRUE)
+    ) %>%
+    select(participante, tarea, indice)
+}
+
+indice_produccion <- calcular_indice_aoi("Produccion") %>% rename(indice_produccion = indice)
+indice_chatia     <- calcular_indice_aoi("ChatIA")     %>% rename(indice_chatia = indice)
+
+validacion_otras_aoi <- calificacion %>%
+  left_join(indice_produccion, by = c("participante", "tarea")) %>%
+  left_join(indice_chatia, by = c("participante", "tarea"))
+
+cor.test(validacion_otras_aoi$indice_produccion, validacion_otras_aoi$puntaje_inferencia, method = "spearman")
+cor.test(validacion_otras_aoi$indice_chatia, validacion_otras_aoi$puntaje_inferencia, method = "spearman")
+```
+Se replicó la misma correlación con los índices de procesamiento calculados para Producción (ρ = 0.033, p = 0.830) y Chat de IA (ρ = -0.061, p = 0.711). Ninguna de las tres áreas de interés mostró una relación significativa con el puntaje de inferencia, lo que sugiere que la ausencia de relación no es específica de la Fuente, sino un patrón consistente en las tres áreas.
+## Hipótesis principal, separada por tarea
+
+```{r hipotesis_principal_por_tarea}
+declarativa_hp <- filter(validacion_hp, tarea == "declarativa")
+procedimental_hp <- filter(validacion_hp, tarea == "procedimental")
+
+cor.test(declarativa_hp$indice_fuente, declarativa_hp$puntaje_inferencia, method = "spearman")
+cor.test(procedimental_hp$indice_fuente, procedimental_hp$puntaje_inferencia, method = "spearman")
+```
+Al separar la correlación entre el procesamiento en Fuente y el puntaje de inferencia por tarea, se observó un patrón divergente: en la tarea declarativa la relación fue positiva, en la dirección predicha por la hipótesis (ρ = 0.213, p = 0.330, n = 23), mientras que en la procedimental fue negativa (ρ = -0.282, p = 0.193, n = 24). Ninguna de las dos correlaciones alcanzó significancia estadística, pero su magnitud fue mayor que la del análisis conjunto (ρ = -0.051)
+## Índice de Fuente con solo dos métricas (fijación y pupila)
+
+```{r indice_fuente_2piezas}
+indice_fuente_2 <- cov_fuente %>%
+  mutate(
+    z_fijacion      = as.numeric(scale(duracion_fijacion)),
+    z_pupila        = as.numeric(scale(pupila)),
+    indice_fuente_2 = rowMeans(cbind(z_fijacion, z_pupila), na.rm = TRUE)
+  ) %>%
+  select(participante, tarea, indice_fuente_2)
+
+validacion_hp_2 <- indice_fuente_2 %>%
+  left_join(calificacion, by = c("participante", "tarea"))
+
+cor.test(validacion_hp_2$indice_fuente_2, validacion_hp_2$puntaje_inferencia, method = "spearman")
+```
+Se recalculó el índice de Fuente usando únicamente las dos métricas con covarianza significativa entre sí (duración de fijación y diámetro pupilar), excluyendo la amplitud de sacada. La correlación con el puntaje de inferencia siguió sin ser significativa (ρ = -0.132, p = 0.383, n = 23), con una magnitud algo mayor que la del índice de tres piezas (ρ = -0.051, p = 0.737), lo que indica que la falta de relación no se debe a que la amplitud de sacada esté diluyendo una señal presente en las otras dos métricas.
+## Cada métrica de Fuente por separado, contra el puntaje de inferencia, por tarea
+
+```{r hipotesis_por_metrica}
+validacion_metricas <- cov_fuente %>%
+  left_join(calificacion, by = c("participante", "tarea"))
+
+correlacion_metrica <- function(datos, metrica_nombre, metrica_col) {
+  d <- datos %>% filter(!is.na(.data[[metrica_col]]), !is.na(puntaje_inferencia))
+  test <- cor.test(d[[metrica_col]], d$puntaje_inferencia, method = "spearman")
+  tibble(metrica = metrica_nombre, n = nrow(d),
+         rho = round(unname(test$estimate), 3), p_valor = round(test$p.value, 3))
+}
+
+resultado_metricas <- validacion_metricas %>%
+  group_by(tarea) %>%
+  group_modify(~ bind_rows(
+    correlacion_metrica(.x, "duracion_fijacion", "duracion_fijacion"),
+    correlacion_metrica(.x, "amplitud_sacada", "salto_grados"),
+    correlacion_metrica(.x, "diametro_pupila", "pupila")
+  )) %>%
+  ungroup() %>%
+  mutate(significativo = p_valor < 0.05)
+
+resultado_metricas
+```
+Al descomponer el procesamiento en Fuente en sus tres métricas por separado, ninguna correlación alcanzó significancia estadística. La duración de fijación mostró la asociación más marcada en ambas tareas, con dirección opuesta entre ellas (declarativa: ρ = 0.361, p = 0.091; procedimental: ρ = -0.369, p = 0.083), consistente con el patrón divergente observado en el índice combinado. La amplitud de sacada y el diámetro pupilar mostraron asociaciones más débiles. Dado que se corrieron seis pruebas sin corrección por comparaciones múltiples, estos resultados marginales deben interpretarse con cautela y no como evidencia confirmada.
+## Cada métrica de Producción por separado, contra el puntaje de inferencia, por tarea
+
+```{r hipotesis_por_metrica_produccion}
+cov_produccion <- datos_aoi %>%
+  filter(AOI == "Produccion") %>%
+  group_by(participante, tarea) %>%
+  summarise(
+    duracion_fijacion = median(duracion_fijacion),
+    salto_grados      = median(InterfixDegree[tipo_intervalo == "salto"], na.rm = TRUE),
+    pupila            = median(PupilDiam, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+validacion_metricas_produccion <- cov_produccion %>%
+  left_join(calificacion, by = c("participante", "tarea"))
+
+resultado_metricas_produccion <- validacion_metricas_produccion %>%
+  group_by(tarea) %>%
+  group_modify(~ bind_rows(
+    correlacion_metrica(.x, "duracion_fijacion", "duracion_fijacion"),
+    correlacion_metrica(.x, "amplitud_sacada", "salto_grados"),
+    correlacion_metrica(.x, "diametro_pupila", "pupila")
+  )) %>%
+  ungroup() %>%
+  mutate(significativo = p_valor < 0.05)
+
+resultado_metricas_produccion
+```
+Al descomponer el procesamiento en Producción en sus tres métricas por separado, el diámetro pupilar mostró una correlación negativa y estadísticamente significativa con el puntaje de inferencia durante la tarea procedimental (ρ = -0.417, p = 0.048, n = 23): a mayor dilatación pupilar en el área de Producción, menor fue el puntaje obtenido en la pregunta de inferencia. Este patrón podría reflejar que, en la tarea de código, una mayor carga cognitiva al aplicar la solución (medida por la dilatación pupilar) se asoció con una comprensión más débil del resultado final, en lugar de con un procesamiento más profundo. Ninguna otra combinación de métrica, área de interés o tarea alcanzó significancia estadística en este análisis exploratorio.
+
+## Modelo ordinal para la hipótesis principal: Fuente y puntaje de inferencia
+
+```{r modelo_ordinal_hipotesis_principal}
+datos_ordinal_fuente <- validacion_hp %>%
+  mutate(puntaje_ordinal = factor(puntaje_inferencia, ordered = TRUE))
+
+modelo_ordinal_fuente <- polr(puntaje_ordinal ~ indice_fuente, data = datos_ordinal_fuente, Hess = TRUE)
+summary(modelo_ordinal_fuente)
+
+coef_tabla_fuente <- coef(summary(modelo_ordinal_fuente))
+p_valor_fuente <- pnorm(abs(coef_tabla_fuente[, "t value"]), lower.tail = FALSE) * 2
+cbind(coef_tabla_fuente, p_valor_fuente)
+```
+## Modelo ordinal para la hipótesis principal, por tarea
+
+```{r modelo_ordinal_hipotesis_principal_tarea}
+declarativa_ordinal <- filter(datos_ordinal_fuente, tarea == "declarativa")
+procedimental_ordinal <- filter(datos_ordinal_fuente, tarea == "procedimental")
+
+modelo_ordinal_declarativa <- polr(puntaje_ordinal ~ indice_fuente, data = declarativa_ordinal, Hess = TRUE)
+modelo_ordinal_procedimental <- polr(puntaje_ordinal ~ indice_fuente, data = procedimental_ordinal, Hess = TRUE)
+
+extraer_fila <- function(modelo, nombre_tarea) {
+  coef_tabla <- coef(summary(modelo))
+  p_valor <- pnorm(abs(coef_tabla["indice_fuente", "t value"]), lower.tail = FALSE) * 2
+  tibble(tarea = nombre_tarea, beta = round(coef_tabla["indice_fuente", "Value"], 3),
+         p_valor = round(p_valor, 3))
+}
+
+bind_rows(
+  extraer_fila(modelo_ordinal_declarativa, "declarativa"),
+  extraer_fila(modelo_ordinal_procedimental, "procedimental")
+)
+```
+## Cada métrica de Chat de IA por separado, contra el puntaje de inferencia, por tarea
+
+```{r hipotesis_por_metrica_chatia}
+cov_chatia <- datos_aoi %>%
+  filter(AOI == "ChatIA") %>%
+  group_by(participante, tarea) %>%
+  summarise(
+    duracion_fijacion = median(duracion_fijacion),
+    salto_grados      = median(InterfixDegree[tipo_intervalo == "salto"], na.rm = TRUE),
+    pupila            = median(PupilDiam, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+validacion_metricas_chatia <- cov_chatia %>%
+  left_join(calificacion, by = c("participante", "tarea"))
+
+resultado_metricas_chatia <- validacion_metricas_chatia %>%
+  group_by(tarea) %>%
+  group_modify(~ bind_rows(
+    correlacion_metrica(.x, "duracion_fijacion", "duracion_fijacion"),
+    correlacion_metrica(.x, "amplitud_sacada", "salto_grados"),
+    correlacion_metrica(.x, "diametro_pupila", "pupila")
+  )) %>%
+  ungroup() %>%
+  mutate(significativo = p_valor < 0.05)
+
+resultado_metricas_chatia
+```
+Al descomponer el procesamiento en el Chat de IA en sus tres métricas por separado, ninguna correlación alcanzó significancia estadística. El resultado más cercano fue el diámetro pupilar durante la tarea procedimental (ρ = -0.400, p = 0.059), que se aproxima al patrón encontrado en Producción para la misma métrica y tarea, aunque sin cruzar el umbral convencional. Cabe señalar que en la tarea declarativa el tamaño de muestra fue menor (n = 16 en lugar de 23), debido a que varios participantes no registraron fijaciones válidas en el Chat de IA durante esa tarea, consistente con la baja proporción de atención hacia esta área ya documentada en el objetivo 1.
+## Modelo ordinal: pupila en Producción y puntaje de inferencia (procedimental)
+
+```{r modelo_ordinal_pupila}
+library(MASS)
+
+datos_ordinal <- validacion_metricas_produccion %>%
+  filter(tarea == "procedimental") %>%
+  mutate(puntaje_ordinal = factor(puntaje_inferencia, ordered = TRUE))
+
+modelo_ordinal <- polr(puntaje_ordinal ~ pupila, data = datos_ordinal, Hess = TRUE)
+summary(modelo_ordinal)
+
+# p-valor (polr no lo da directo, se calcula a partir del valor t)
+coef_tabla <- coef(summary(modelo_ordinal))
+p_valor <- pnorm(abs(coef_tabla[, "t value"]), lower.tail = FALSE) * 2
+cbind(coef_tabla, p_valor)
+```
+Dado que el puntaje de inferencia es una variable ordinal con solo cuatro categorías y numerosos empates, se replicó el análisis de la pupila en Producción durante la tarea procedimental mediante un modelo de regresión logística ordinal, que no asume que las categorías estén equiespaciadas. El coeficiente mantuvo la dirección negativa observada con Spearman, pero no alcanzó significancia estadística (β = -1.436, EE = 0.954, p = 0.132, n = 22), lo que sugiere que el resultado significativo obtenido con la correlación de Spearman podría ser sensible al método de análisis, y debe interpretarse con mayor cautela.
+## Pupila combinando las tres AOI, solo en procedimental
+
+```{r pupila_combinada_procedimental}
+pupila_combinada <- cov_datos %>%
+  filter(tarea == "procedimental") %>%
+  dplyr::select(participante, pupila) %>%
+  left_join(filter(calificacion, tarea == "procedimental"), by = "participante")
+
+cor.test(pupila_combinada$pupila, pupila_combinada$puntaje_inferencia, method = "spearman")
+```
+Como análisis complementario, se calculó el diámetro pupilar combinando las fijaciones de las tres áreas de interés, para obtener una estimación más estable por participante durante la tarea procedimental. La correlación con el puntaje de inferencia se acercó al umbral convencional de significancia sin alcanzarlo (ρ = -0.381, p = 0.073, n = 24), con una magnitud comparable a la observada al analizar las áreas de interés por separado (ρ entre -0.315 y -0.417). Este patrón consistente en las tres áreas y en su combinación sugiere que la dilatación pupilar durante la tarea procedimental, en general, se asocia de forma negativa con el puntaje de inferencia, aunque solo el análisis de Producción por sí sola alcanzó significancia estadística.
+## Métricas sin AOI: todas las fijaciones del video, contra el puntaje de inferencia, por tarea
+
+```{r metricas_completas}
+metricas_completas <- read_csv("metricas_completas.csv", show_col_types = FALSE)
+
+validacion_completas <- metricas_completas %>%
+  left_join(calificacion, by = c("participante", "tarea"))
+
+resultado_completas <- validacion_completas %>%
+  group_by(tarea) %>%
+  group_modify(~ bind_rows(
+    correlacion_metrica(.x, "duracion_fijacion", "duracion_fijacion"),
+    correlacion_metrica(.x, "amplitud_sacada", "salto_grados"),
+    correlacion_metrica(.x, "diametro_pupila", "pupila")
+  )) %>%
+  ungroup() %>%
+  mutate(significativo = p_valor < 0.05)
+
+resultado_completas
+```
+Como análisis complementario independiente de las áreas de interés, se calcularon la duración de fijación, la amplitud de sacada y el diámetro pupilar a partir de todas las fijaciones registradas en cada tarea (entre 176 y 2,372 por participante y tarea), sin depender del muestreo ni de la asignación a áreas de interés. Ninguna de estas métricas se correlacionó significativamente con el puntaje de inferencia en ninguna de las dos tareas (todas |ρ| ≤ 0.286, p ≥ 0.197, n = 22 por tarea). El diámetro pupilar en la tarea procedimental fue la única con una tendencia negativa consistente con los análisis por área de interés (ρ = -0.286), aunque de menor magnitud. Con esta muestra, el análisis solo tendría potencia suficiente para detectar correlaciones de aproximadamente 0.57 o mayores, por lo que no puede descartarse una relación real de menor tamaño.
+## Proporción de fijaciones en Fuente y puntaje de inferencia, por tarea
+
+```{r proporcion_fuente_puntaje}
+prop_fuente <- datos_aoi %>%
+  group_by(participante, tarea) %>%
+  summarise(pct_fuente = 100 * mean(AOI == "Fuente"), .groups = "drop") %>%
+  left_join(calificacion, by = c("participante", "tarea"))
+
+prop_fuente %>%
+  group_by(tarea) %>%
+  group_modify(~ correlacion_metrica(.x, "pct_fuente", "pct_fuente")) %>%
+  ungroup() %>%
+  mutate(significativo = p_valor < 0.05)
+```
+Se evaluó la relación entre la proporción de fijaciones dirigidas a la Fuente y el puntaje de inferencia, por tarea. En la tarea declarativa se observó una tendencia positiva de magnitud moderada, en la dirección planteada por la hipótesis, que no alcanzó significancia estadística (ρ = 0.407, p = 0.054, n = 23). En la tarea procedimental la relación fue negativa y débil (ρ = -0.226, p = 0.300, n = 23). La escasa variabilidad del puntaje de inferencia en la tarea declarativa (la mayoría de los participantes obtuvo 2 puntos) y el tamaño de la muestra limitan la interpretación de estos resultados.
+# 7. Chequeos de robustez
+
+## ¿El efecto de la tarea sobre la atención depende del orden en que se resolvieron?
+
+```{r robustez_orden}
+modelo_chatia_orden <- glmer(es_chatia ~ tarea * orden + (1 | participante),
+                             data = datos_aoi, family = binomial)
+summary(modelo_chatia_orden)
+exp(fixef(modelo_chatia_orden))
+
+modelo_produccion_orden <- glmer(es_produccion ~ tarea * orden + (1 | participante),
+                                 data = datos_aoi, family = binomial)
+summary(modelo_produccion_orden)
+exp(fixef(modelo_produccion_orden))
+```
+Se evaluó si el efecto de la tarea sobre la distribución de la atención dependía del orden de ejecución, incorporando la interacción entre tarea y orden en los modelos binomiales. Para el Chat de IA, la interacción no fue significativa (β = 0.087, p = 0.708), y el efecto de la tarea se mantuvo en ambos grupos (razón de probabilidades de 2.42 en quienes iniciaron con la tarea declarativa y de 2.64 en quienes iniciaron con la procedimental). Lo mismo ocurrió en Producción (interacción β = 0.049, p = 0.789; razón de probabilidades de 0.37 y 0.38, respectivamente). El orden tampoco mostró un efecto principal significativo en ninguno de los dos modelos (p = 0.672 y p = 0.161). Estos resultados indican que el desbalance en el contrabalanceo (14 y 10 participantes) no explica las diferencias entre tareas.
+
+## ¿Cambian las conclusiones al usar el logaritmo de la variable?
+
+```{r robustez_log}
+# saltos con amplitud 0 no admiten logaritmo: se cuentan y se dejan fuera del modelo log
+sum(solo_saltos$InterfixDegree <= 0, na.rm = TRUE)
+solo_saltos_pos <- solo_saltos %>% filter(InterfixDegree > 0)
+
+log_fase          <- lmer(log(duracion_fijacion) ~ fase + (1 | participante), data = chat_ia)
+log_aoi_dur       <- lmer(log(duracion_fijacion) ~ AOI + (1 | participante), data = datos_aoi)
+log_aoi_tarea_dur <- lmer(log(duracion_fijacion) ~ AOI * tarea + (1 | participante), data = datos_aoi)
+log_aoi_sac       <- lmer(log(InterfixDegree) ~ AOI + (1 | participante), data = solo_saltos_pos)
+log_aoi_tarea_sac <- lmer(log(InterfixDegree) ~ AOI * tarea + (1 | participante), data = solo_saltos_pos)
+log_aoi_pup       <- lmer(log(PupilDiam) ~ AOI + (1 | participante), data = datos_aoi)
+log_aoi_tarea_pup <- lmer(log(PupilDiam) ~ AOI * tarea + (1 | participante), data = datos_aoi)
+
+extraer_p <- function(modelo, nombre, version) {
+  coef(summary(modelo)) %>%
+    as.data.frame() %>%
+    rownames_to_column("termino") %>%
+    transmute(modelo = nombre, version = version, termino,
+              p_valor = round(`Pr(>|t|)`, 3))
+}
+
+pares <- list(
+  "duración ~ fase (Chat de IA)" = list(modelo_fase_duracion, log_fase),
+  "duración ~ AOI"               = list(modelo_aoi_duracion, log_aoi_dur),
+  "duración ~ AOI x tarea"       = list(modelo_aoi_tarea_duracion, log_aoi_tarea_dur),
+  "sacada ~ AOI"                 = list(modelo_aoi_sacada, log_aoi_sac),
+  "sacada ~ AOI x tarea"         = list(modelo_aoi_tarea_sacada, log_aoi_tarea_sac),
+  "pupila ~ AOI"                 = list(modelo_aoi_pupila, log_aoi_pup),
+  "pupila ~ AOI x tarea"         = list(modelo_aoi_tarea_pupila, log_aoi_tarea_pup)
+)
+
+comparacion_p <- imap(pares, function(par, nombre) {
+  bind_rows(extraer_p(par[[1]], nombre, "original"),
+            extraer_p(par[[2]], nombre, "log"))
+}) %>%
+  bind_rows() %>%
+  filter(termino != "(Intercept)") %>%
+  pivot_wider(names_from = version, values_from = p_valor) %>%
+  mutate(cambia_conclusion = (original < 0.05) != (log < 0.05))
+
+comparacion_p
+```
+
+```{r robustez_log_residuos}
+extremo <- function(modelo) round(max(abs(resid(modelo, scaled = TRUE))), 1)
+
+tibble(
+  variable = c("duración de fijación", "amplitud de sacada", "diámetro pupilar"),
+  residuo_extremo_original = c(extremo(modelo_aoi_duracion), extremo(modelo_aoi_sacada),
+                               extremo(modelo_aoi_pupila)),
+  residuo_extremo_log = c(extremo(log_aoi_dur), extremo(log_aoi_sac), extremo(log_aoi_pup))
+)
+```
+Los residuos del modelo original mostraron colas pesadas (residuo estandarizado máximo de 12.0 para la duración de fijación, 10.6 para la amplitud de sacada y 13.0 para el diámetro pupilar). Con la transformación logarítmica, estos valores bajaron a 4.5 y 5.0 para la duración y la sacada, respectivamente, lo que indica un mejor ajuste, mientras que para el diámetro pupilar se mantuvieron elevados (9.7), sugiriendo la presencia de valores atípicos aislados no corregibles mediante transformación. En ninguna de las tres variables el uso del logaritmo alteró las conclusiones sobre las diferencias entre áreas de interés, con la excepción ya mencionada de la interacción entre Producción y tarea en la duración de fijación, que se reporta en ambas versiones.
+## Potencia de las correlaciones
+
+```{r robustez_potencia}
+n_usados <- c(16, 22, 23, 24)
+
+tibble(
+  n = n_usados,
+  correlacion_minima_detectable = sapply(n_usados, function(n)
+    round(pwr.r.test(n = n, sig.level = 0.05, power = 0.80)$r, 3))
+)
+
+# potencia real para correlaciones de distinto tamaño, con n = 23
+tibble(
+  correlacion_real = c(0.1, 0.2, 0.3, 0.4, 0.5),
+  potencia = sapply(c(0.1, 0.2, 0.3, 0.4, 0.5), function(r)
+    round(pwr.r.test(n = 23, r = r, sig.level = 0.05)$power, 2))
+)
+```
+Dado que varios resultados de las correlaciones no fueron significativos, se calculó la sensibilidad del diseño. Con 22 a 24 pares de observaciones, el estudio tenía un 80% de potencia para detectar correlaciones de aproximadamente 0.54 a 0.56 o mayores (α = 0.05, prueba bilateral), y de 0.64 en los análisis con 16 pares. Con 23 pares, la probabilidad de detectar una correlación real de 0.30 fue de aproximadamente 29%, y de 0.40, de 49%. Por lo tanto, los resultados no significativos permiten descartar relaciones fuertes entre las variables, pero no relaciones de magnitud pequeña a moderada. Estos valores corresponden a la correlación de Pearson; para la correlación de Spearman, empleada en los análisis, la sensibilidad es algo menor.
+## Mediana del puntaje de inferencia por tarea
+
+```{r mediana_puntaje_tarea}
+calificacion %>%
+  group_by(tarea) %>%
+  summarise(mediana = median(puntaje_inferencia, na.rm = TRUE),
+            media = round(mean(puntaje_inferencia, na.rm = TRUE), 2),
+            n = sum(!is.na(puntaje_inferencia)))
+```
+## ¿La hora de la sesión se relaciona con el diámetro pupilar?
+
+```{r hora_vs_pupila}
+hora_sesion <- read_csv("hora_sesion.csv", show_col_types = FALSE)
+
+pupila_hora <- cov_datos %>%
+  dplyr::select(participante, tarea, pupila) %>%
+  left_join(hora_sesion, by = "participante")
+
+pupila_hora %>%
+  group_by(tarea) %>%
+  group_modify(~ correlacion_par(.x, "hora_local vs pupila", "hora_local_decimal", "pupila")) %>%
+  ungroup()
+
+```
+
+# 8. Exploratorio: variantes en la construcción del índice
+Esta sección es exploratoria. Reúne variantes del índice que no estaban en el diseño original y que surgieron al revisar su validez. Se reportan todas las variantes, no solo las que den resultado.
+
+## 8.1 Construir las variantes
+```{r variantes_indice}
+construir_variantes <- function(d) {
+  d %>%
+    group_by(participante, tarea) %>%
+    summarise(
+      duracion_fijacion = median(duracion_fijacion),
+      salto_grados      = median(InterfixDegree[tipo_intervalo == "salto"], na.rm = TRUE),
+      pupila            = median(PupilDiam, na.rm = TRUE),
+      n_fijaciones      = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      z_fijacion = as.numeric(scale(duracion_fijacion)),
+      z_sacada   = as.numeric(scale(salto_grados)),
+      z_pupila   = as.numeric(scale(pupila)),
+      z_conteo   = as.numeric(scale(n_fijaciones)),
+      # índice ya reportado (sacada volteada)
+      idx_original       = rowMeans(cbind(z_fijacion, -z_sacada, z_pupila), na.rm = TRUE),
+      # Pregunta 1: solo duración y pupila
+      idx_dos_piezas     = rowMeans(cbind(z_fijacion, z_pupila), na.rm = TRUE),
+      # Pregunta 2: sacada sin voltear
+      idx_sacada_directa = rowMeans(cbind(z_fijacion, z_sacada, z_pupila), na.rm = TRUE),
+      # Preguntas 3 y 4: duración, pupila y cantidad de fijaciones (sin sacada)
+      idx_con_conteo     = rowMeans(cbind(z_fijacion, z_pupila, z_conteo), na.rm = TRUE)
+    )
+}
+
+variantes <- c("idx_original", "idx_dos_piezas", "idx_sacada_directa", "idx_con_conteo")
+v_global  <- construir_variantes(datos_aoi)
+
+# Verificación: idx_original debe reproducir el índice ya reportado (diferencia cercana a 0)
+v_global %>%
+  left_join(select(indice, participante, tarea, indice_pc), by = c("participante", "tarea")) %>%
+  summarise(max_diferencia = max(abs(idx_original - indice_pc), na.rm = TRUE))
+```
+
+## 8.2 ¿La cantidad de fijaciones covaría con las otras tres métricas?
+```{r covarianza_con_conteo}
+metricas <- c("duracion_fijacion", "salto_grados", "pupila", "n_fijaciones")
+
+map_dfr(combn(metricas, 2, simplify = FALSE), function(p) {
+  t <- cor.test(v_global[[p[1]]], v_global[[p[2]]], method = "spearman", exact = FALSE)
+  tibble(par = paste(p, collapse = " - "),
+         rho = round(unname(t$estimate), 3), p_valor = round(t$p.value, 3))
+})
+```
+
+## 8.3 Diferencia entre tareas con cada variante
+```{r variantes_entre_tareas}
+map_dfr(variantes, function(v) {
+  m <- lmer(as.formula(paste(v, "~ tarea + (1 | participante)")), data = v_global)
+  coefs <- summary(m)$coefficients
+  tibble(variante = v,
+         beta    = round(coefs[2, "Estimate"], 3),
+         p_valor = round(coefs[2, "Pr(>|t|)"], 3))
+})
+```
+
+## 8.4 Validación externa con cada variante (esfuerzo mental e interacciones con la IA)
+```{r variantes_validacion}
+validacion_var <- v_global %>%
+  left_join(esfuerzo, by = c("participante", "tarea")) %>%
+  left_join(interacciones, by = c("participante", "tarea")) %>%
+  pivot_longer(all_of(variantes), names_to = "variante", values_to = "indice")
+
+validacion_var %>%
+  group_by(variante, tarea) %>%
+  group_modify(~ bind_rows(
+    correlacion_par(.x, "índice vs esfuerzo (Paas)", "indice", "esfuerzo_paas"),
+    correlacion_par(.x, "índice vs interacciones con la IA", "indice", "n_interacciones_ia")
+  )) %>%
+  ungroup()
+```
+
+## 8.5 Hipótesis principal (índice en Fuente y puntaje de inferencia) con cada variante
+```{r variantes_hipotesis_principal}
+fuente_largo <- construir_variantes(filter(datos_aoi, AOI == "Fuente")) %>%
+  left_join(calificacion, by = c("participante", "tarea")) %>%
+  pivot_longer(all_of(variantes), names_to = "variante", values_to = "indice")
+
+# combinando ambas tareas
+fuente_largo %>%
+  group_by(variante) %>%
+  group_modify(~ correlacion_par(.x, "combinado", "indice", "puntaje_inferencia")) %>%
+  ungroup()
+
+# por tarea
+fuente_largo %>%
+  group_by(variante, tarea) %>%
+  group_modify(~ correlacion_par(.x, "por tarea", "indice", "puntaje_inferencia")) %>%
+  ungroup()
+```
+## 8.6 ¿La cantidad de fijaciones en Fuente, sola, se relaciona con el puntaje?
+```{r conteo_fuente_puntaje}
+fuente_conteo <- construir_variantes(filter(datos_aoi, AOI == "Fuente")) %>%
+  left_join(calificacion, by = c("participante", "tarea"))
+
+fuente_conteo %>%
+  group_by(tarea) %>%
+  group_modify(~ correlacion_par(.x, "n_fijaciones en Fuente vs puntaje", "n_fijaciones", "puntaje_inferencia")) %>%
+  ungroup()
+```
+```{r fijaciones_menos_de_60}
+conteo %>%
+  pivot_longer(c(declarativa, procedimental), names_to = "tarea", values_to = "n") %>%
+  group_by(tarea) %>%
+  summarise(sesiones    = n(),
+            minimo      = min(n),
+            mediana     = median(n),
+            maximo      = max(n),
+            menos_de_60 = sum(n < 60),
+            .groups = "drop")
+```
+## OUTSIDE y las tres AOI
+```{r outside}
+# Calidad: qué porcentaje de fijaciones cayó fuera de las 3 AOI
+datos %>%
+  count(AOI) %>%
+  mutate(porcentaje = round(100 * n / sum(n), 1))
+
+# De aquí en adelante se trabaja solo con las 3 AOI de interés
+datos_aoi <- datos %>% filter(AOI != "OUTSIDE")
+nrow(datos_aoi)
+```
+
+## Dispersión de la proporción de atención entre participantes
+
+```{r dispersion_proporcion_aoi}
+proporcion_por_persona <- droplevels(datos_aoi) %>%
+  count(participante, tarea, AOI) %>%
+  complete(participante, tarea, AOI, fill = list(n = 0)) %>%
+  group_by(participante, tarea) %>%
+  mutate(porcentaje = 100 * n / sum(n)) %>%
+  ungroup() %>%
+  mutate(AOI = factor(AOI,
+                      levels = c("Fuente", "ChatIA", "Produccion"),
+                      labels = c("Fuente", "Chat de IA", "Producción")))
+
+ggplot(proporcion_por_persona, aes(x = AOI, y = porcentaje, fill = tarea)) +
+  geom_boxplot() +
+  labs(x = "Área de interés", y = "% de fijaciones por participante", fill = "Tarea")
+ggsave("figuras/resultados/dispersion_atencion.pdf", width = 7, height = 5, dpi = 300)
+
+proporcion_por_persona %>%
+  group_by(tarea, AOI) %>%
+  summarise(mediana = round(median(porcentaje), 1),
+            q1 = round(quantile(porcentaje, 0.25), 1),
+            q3 = round(quantile(porcentaje, 0.75), 1),
+            sin_fijaciones = sum(n == 0),
+            .groups = "drop")
+```
+
+```{r chat_sin_fase}
+datos_aoi %>%
+  filter(AOI == "ChatIA") %>%
+  group_by(participante) %>%
+  summarise(n_chat = n(), con_fase = sum(!is.na(fase)), .groups = "drop") %>%
+  filter(con_fase == 0)
+```
